@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import warnings
 from pathlib import Path
 from typing import Final
 
@@ -133,7 +134,11 @@ def _load_font(size: int) -> ImageFont.ImageFont:
                 return ImageFont.truetype(path, size=size)
             except OSError:
                 continue
-    return ImageFont.load_default()
+    warnings.warn(
+        "No preferred form font found; using Pillow default at the requested size.",
+        stacklevel=2,
+    )
+    return ImageFont.load_default(size=size)
 
 
 def _wrap_text(
@@ -174,15 +179,27 @@ def _draw_field(
 
     font = _load_font(font_size)
     max_width = max(1, x1 - x0 - 16)
+    max_height = max(1, y1 - y0)
     lines = _wrap_text(draw, text, font, max_width) if multiline else [text]
 
-    # Shrink font if a single line is too wide.
-    while not multiline and len(lines) == 1:
-        width = draw.textbbox((0, 0), lines[0], font=font)[2]
-        if width <= max_width or font_size <= 22:
-            break
-        font_size -= 2
-        font = _load_font(font_size)
+    if multiline:
+        # Shrink font when wrapped lines exceed the box height.
+        while font_size > 22:
+            line_height = draw.textbbox((0, 0), "Ag", font=font)[3] + 6
+            total_height = line_height * len(lines)
+            if total_height <= max_height:
+                break
+            font_size -= 2
+            font = _load_font(font_size)
+            lines = _wrap_text(draw, text, font, max_width)
+    else:
+        # Shrink font if a single line is too wide.
+        while len(lines) == 1:
+            width = draw.textbbox((0, 0), lines[0], font=font)[2]
+            if width <= max_width or font_size <= 22:
+                break
+            font_size -= 2
+            font = _load_font(font_size)
 
     line_height = draw.textbbox((0, 0), "Ag", font=font)[3] + 6
     total_height = line_height * len(lines)

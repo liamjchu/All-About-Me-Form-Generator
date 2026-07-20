@@ -131,10 +131,12 @@ def _parse_form_json(raw: str) -> dict[str, str]:
         text = re.sub(r"\s*```$", "", text)
     try:
         parsed = json.loads(text)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as error:
         match = re.search(r"\{.*\}", text, flags=re.DOTALL)
         if not match:
-            raise RuntimeError("The model did not return usable JSON for the form.")
+            raise RuntimeError(
+                "The model did not return usable JSON for the form."
+            ) from error
         parsed = json.loads(match.group(0))
     if not isinstance(parsed, dict):
         raise RuntimeError("The model JSON was not an object.")

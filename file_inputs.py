@@ -24,7 +24,10 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> str:
 
     parts: list[str] = []
     for page in reader.pages:
-        text = (page.extract_text() or "").strip()
+        try:
+            text = (page.extract_text() or "").strip()
+        except Exception as error:
+            raise ValueError(f"Could not read PDF: {error}") from error
         if text:
             parts.append(text)
 
