@@ -8,4 +8,8 @@ __pycache__/
 # Environments
 .env
 venv/
+.venv/
 env/
+
+# Local PDF calibration previews
+_pdf_preview/
