@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import re
 import warnings
 from pathlib import Path
 from typing import Final
@@ -13,32 +14,49 @@ from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
 PROJECT_ROOT: Final = Path(__file__).resolve().parent
-TEMPLATE_PDF: Final = PROJECT_ROOT / "formTemplate.pdf"
+_TEMPLATE_NAMES: Final = ("formTemplate.pdf", "All About Me Template.pdf")
+_FONTS_DIR: Final = PROJECT_ROOT / "fonts"
 
-# Preview calibration used 1190x1541; page images are 1545x2000.
+# Preview calibration used 1190x1541; page images are typically 2550x3300.
 _PREVIEW_SIZE: Final = (1190, 1541)
-_IMAGE_SIZE: Final = (1545, 2000)
 
 # Boxes in preview coordinates (x0, y0, x1, y1), top-left origin.
+# Sized so filled text can match nearby template labels/headers.
 _PAGE1_BOXES: Final[dict[str, tuple[int, int, int, int]]] = {
-    "name": (300, 430, 890, 530),
-    "favorite_things_1": (155, 770, 750, 830),
-    "favorite_things_2": (155, 853, 750, 913),
-    "favorite_things_3": (155, 937, 750, 997),
-    "reinforcers_1": (395, 1100, 1050, 1160),
-    "reinforcers_2": (395, 1182, 1050, 1242),
-    "reinforcers_3": (395, 1265, 1050, 1325),
-    "reinforcers_4": (395, 1348, 1050, 1408),
+    "name": (250, 420, 940, 545),
+    "favorite_things_1": (90, 760, 940, 855),
+    "favorite_things_2": (90, 865, 940, 960),
+    "favorite_things_3": (90, 970, 940, 1065),
+    "reinforcers_1": (340, 1090, 1100, 1190),
+    "reinforcers_2": (340, 1200, 1100, 1290),
+    "reinforcers_3": (340, 1300, 1100, 1390),
+    "reinforcers_4": (340, 1400, 1100, 1490),
 }
 
+# Bulleted list layout on page 1 (preview coordinates, relative to each cover box).
+_PAGE1_BULLET_FROM_BOX_X: Final = 50
+_PAGE1_BULLET_TEXT_FROM_BOX_X: Final = 110
+_BULLET_RADIUS_PREVIEW: Final = 8
+
 _PAGE2_BOXES: Final[dict[str, tuple[int, int, int, int]]] = {
-    "parent_name": (280, 260, 1000, 320),
-    "parent_phone": (290, 345, 1000, 405),
-    "parent_email": (280, 430, 1000, 490),
-    "allergies": (150, 595, 1030, 710),
-    "bathroom_needs": (150, 800, 1030, 880),
-    "behavioral_management": (140, 985, 1040, 1140),
+    "parent_name": (280, 245, 1040, 335),
+    "parent_phone": (290, 330, 1040, 420),
+    "parent_email": (280, 415, 1040, 505),
+    "allergies": (140, 605, 1040, 760),
+    "bathroom_needs": (140, 860, 1040, 1045),
+    "behavioral_management": (130, 1150, 1050, 1420),
 }
+
+# Target font sizes (pixels at full page resolution). Shrink floors keep long
+# values readable instead of collapsing to tiny text.
+_FONT_NAME: Final = 240
+_FONT_BULLET: Final = 110
+_FONT_PAGE2_LINE: Final = 115
+_FONT_PAGE2_EMAIL: Final = 105
+_FONT_PAGE2_BODY: Final = 100
+_FONT_MIN_NAME: Final = 140
+_FONT_MIN_BULLET: Final = 70
+_FONT_MIN_PAGE2: Final = 70
 
 _FIELD_KEYS: Final[tuple[str, ...]] = (
     "name",
@@ -58,11 +76,26 @@ _FIELD_KEYS: Final[tuple[str, ...]] = (
 )
 
 _FONT_CANDIDATES: Final[tuple[str, ...]] = (
+    str(_FONTS_DIR / "Chewy-Regular.ttf"),
     "/System/Library/Fonts/Supplemental/Arial Rounded Bold.ttf",
+    "C:/Windows/Fonts/ARLRDBD.TTF",
+    str(_FONTS_DIR / "Nunito-ExtraBold.ttf"),
+    str(_FONTS_DIR / "Nunito-Bold.ttf"),
     "/System/Library/Fonts/SFCompactRounded.ttf",
     "/Library/Fonts/Arial Bold.ttf",
     "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
 )
+
+
+def _template_pdf() -> Path:
+    for name in _TEMPLATE_NAMES:
+        path = PROJECT_ROOT / name
+        if path.is_file():
+            return path
+    raise RuntimeError(
+        "PDF template not found. Add formTemplate.pdf or All About Me Template.pdf "
+        "to the project folder (each page must be a full-page embedded bitmap)."
+    )
 
 
 def empty_form_data() -> dict[str, str]:
@@ -107,12 +140,47 @@ def normalize_form_data(raw: dict) -> dict[str, str]:
         if isinstance(raw.get(key), str):
             data[key] = raw[key].strip()
 
-    # Sensible defaults for medical-style fields when unknown.
-    for key in ("allergies", "bathroom_needs"):
-        if not data[key]:
-            data[key] = "N/A"
+    # Mobility phrases (e.g. "independent walker") must not land in toileting.
+    data["bathroom_needs"] = _sanitize_bathroom_needs(data["bathroom_needs"])
+    data["allergies"] = _na_if_blank_or_none(data["allergies"])
+    data["bathroom_needs"] = _na_if_blank_or_none(data["bathroom_needs"])
 
     return data
+
+
+def _na_if_blank_or_none(text: str) -> str:
+    """Normalize empty / none-style answers to N/A for medical-style fields."""
+    if not text or not text.strip():
+        return "N/A"
+    if re.fullmatch(
+        r"(?:n/?a|none|no|nil|nill|not\s+applicable)(?:\s*[.!]*)?",
+        text.strip(),
+        flags=re.IGNORECASE,
+    ):
+        return "N/A"
+    return text
+
+
+def _sanitize_bathroom_needs(text: str) -> str:
+    """Keep toileting independence; drop mobility wording like 'independent walker'."""
+    if not text:
+        return text
+    cleaned = re.sub(
+        r"\bindependent\s+walker\b",
+        "independent",
+        text,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ,;.-")
+    # Bare "no help" style answers become N/A via _na_if_blank_or_none.
+    if re.fullmatch(
+        r"(?:no(?:\s+help(?:\s+needed)?)?|does\s+not\s+need\s+help|"
+        r"independent(?:ly)?(?:\s+in\s+the\s+restroom)?)\.?",
+        cleaned,
+        flags=re.IGNORECASE,
+    ):
+        return "N/A"
+    return cleaned
 
 
 def _map_box(box: tuple[int, int, int, int], size: tuple[int, int]) -> tuple[int, int, int, int]:
@@ -125,6 +193,11 @@ def _map_box(box: tuple[int, int, int, int], size: tuple[int, int]) -> tuple[int
         int(x1 * rw / pw),
         int(y1 * rh / ph),
     )
+
+
+def _map_x(x: int, size: tuple[int, int]) -> int:
+    pw = _PREVIEW_SIZE[0]
+    return int(x * size[0] / pw)
 
 
 def _load_font(size: int) -> ImageFont.ImageFont:
@@ -170,10 +243,13 @@ def _draw_field(
     *,
     center: bool = False,
     font_size: int = 40,
+    min_font_size: int = 28,
     multiline: bool = False,
+    white_bg: bool = False,
 ) -> None:
     x0, y0, x1, y1 = box
-    draw.rectangle(box, fill=(255, 255, 255))
+    if white_bg:
+        draw.rectangle(box, fill=(255, 255, 255))
     if not text:
         return
 
@@ -181,11 +257,12 @@ def _draw_field(
     max_width = max(1, x1 - x0 - 16)
     max_height = max(1, y1 - y0)
     lines = _wrap_text(draw, text, font, max_width) if multiline else [text]
+    floor = min(min_font_size, font_size)
 
     if multiline:
         # Shrink font when wrapped lines exceed the box height.
-        while font_size > 22:
-            line_height = draw.textbbox((0, 0), "Ag", font=font)[3] + 6
+        while font_size > floor:
+            line_height = draw.textbbox((0, 0), "Ag", font=font)[3] + 8
             total_height = line_height * len(lines)
             if total_height <= max_height:
                 break
@@ -196,12 +273,12 @@ def _draw_field(
         # Shrink font if a single line is too wide.
         while len(lines) == 1:
             width = draw.textbbox((0, 0), lines[0], font=font)[2]
-            if width <= max_width or font_size <= 22:
+            if width <= max_width or font_size <= floor:
                 break
             font_size -= 2
             font = _load_font(font_size)
 
-    line_height = draw.textbbox((0, 0), "Ag", font=font)[3] + 6
+    line_height = draw.textbbox((0, 0), "Ag", font=font)[3] + 8
     total_height = line_height * len(lines)
     y = y0 + max(0, (y1 - y0 - total_height) // 2)
 
@@ -213,11 +290,51 @@ def _draw_field(
         y += line_height
 
 
-def _extract_page_images() -> list[Image.Image]:
-    if not TEMPLATE_PDF.exists():
-        raise RuntimeError(f"PDF template not found: {TEMPLATE_PDF.name}")
+def _draw_bullet_line(
+    draw: ImageDraw.ImageDraw,
+    size: tuple[int, int],
+    cover_box: tuple[int, int, int, int],
+    text: str,
+    *,
+    font_size: int = _FONT_BULLET,
+    min_font_size: int = _FONT_MIN_BULLET,
+) -> None:
+    """Draw a bullet and text for a filled row; skip empty rows."""
+    if not text.strip():
+        return
+    _, y0, x1, y1 = _map_box(cover_box, size)
 
-    reader = PdfReader(str(TEMPLATE_PDF))
+    box_x0_preview = cover_box[0]
+    text_x = _map_x(box_x0_preview + _PAGE1_BULLET_TEXT_FROM_BOX_X, size)
+    bullet_x = _map_x(box_x0_preview + _PAGE1_BULLET_FROM_BOX_X, size)
+    bullet_r = max(4, _map_x(_BULLET_RADIUS_PREVIEW, size))
+    cy = (y0 + y1) // 2
+
+    draw.ellipse(
+        (bullet_x - bullet_r, cy - bullet_r, bullet_x + bullet_r, cy + bullet_r),
+        fill=(0, 0, 0),
+    )
+
+    floor = min(min_font_size, font_size)
+    font = _load_font(font_size)
+    max_width = max(1, x1 - text_x - 8)
+    while font_size > floor:
+        width = draw.textbbox((0, 0), text, font=font)[2]
+        if width <= max_width:
+            break
+        font_size -= 2
+        font = _load_font(font_size)
+
+    bbox = draw.textbbox((0, 0), text, font=font)
+    text_h = bbox[3] - bbox[1]
+    y = cy - text_h // 2 - bbox[1]
+    draw.text((text_x, y), text, fill=(0, 0, 0), font=font)
+
+
+def _extract_page_images() -> list[Image.Image]:
+    template_pdf = _template_pdf()
+
+    reader = PdfReader(str(template_pdf))
     images: list[Image.Image] = []
     for page in reader.pages:
         resources = page.get("/Resources")
@@ -247,7 +364,7 @@ def _extract_page_images() -> list[Image.Image]:
 
 
 def fill_form_pdf(form_data: dict[str, str]) -> bytes:
-    """Return a filled PDF (bytes) based on formTemplate.pdf."""
+    """Return a filled PDF (bytes) based on All About Me Template.pdf."""
     data = normalize_form_data(form_data)
     pages = _extract_page_images()
     size = pages[0].size
@@ -259,44 +376,51 @@ def fill_form_pdf(form_data: dict[str, str]) -> bytes:
         _map_box(_PAGE1_BOXES["name"], size),
         data["name"],
         center=True,
-        font_size=64,
+        font_size=_FONT_NAME,
+        min_font_size=_FONT_MIN_NAME,
+        white_bg=True,
     )
     for index in range(1, 4):
         key = f"favorite_things_{index}"
-        _draw_field(
+        _draw_bullet_line(
             draw1,
-            _map_box(_PAGE1_BOXES[key], size),
+            size,
+            _PAGE1_BOXES[key],
             data[key],
-            font_size=40,
+            font_size=_FONT_BULLET,
+            min_font_size=_FONT_MIN_BULLET,
         )
     for index in range(1, 5):
         key = f"reinforcers_{index}"
-        _draw_field(
+        _draw_bullet_line(
             draw1,
-            _map_box(_PAGE1_BOXES[key], size),
+            size,
+            _PAGE1_BOXES[key],
             data[key],
-            font_size=40,
+            font_size=_FONT_BULLET,
+            min_font_size=_FONT_MIN_BULLET,
         )
 
     page2 = pages[1].copy()
     draw2 = ImageDraw.Draw(page2)
     for key, font_size, multiline in (
-        ("parent_name", 40, False),
-        ("parent_phone", 40, False),
-        ("parent_email", 36, False),
-        ("allergies", 40, True),
-        ("bathroom_needs", 40, True),
-        ("behavioral_management", 40, True),
+        ("parent_name", _FONT_PAGE2_LINE, False),
+        ("parent_phone", _FONT_PAGE2_LINE, False),
+        ("parent_email", _FONT_PAGE2_EMAIL, False),
+        ("allergies", _FONT_PAGE2_BODY, True),
+        ("bathroom_needs", _FONT_PAGE2_BODY, True),
+        ("behavioral_management", _FONT_PAGE2_BODY, True),
     ):
         _draw_field(
             draw2,
             _map_box(_PAGE2_BOXES[key], size),
             data[key],
             font_size=font_size,
+            min_font_size=_FONT_MIN_PAGE2,
             multiline=multiline,
         )
 
-    reader = PdfReader(str(TEMPLATE_PDF))
+    reader = PdfReader(str(_template_pdf()))
     page_width = float(reader.pages[0].mediabox.width)
     page_height = float(reader.pages[0].mediabox.height)
 
@@ -316,7 +440,6 @@ def fill_form_pdf(form_data: dict[str, str]) -> bytes:
     pdf.save()
     buffer.seek(0)
 
-    # Re-write through pypdf so the download is a clean 2-page PDF.
     writer = PdfWriter()
     for page in PdfReader(buffer).pages:
         writer.add_page(page)
