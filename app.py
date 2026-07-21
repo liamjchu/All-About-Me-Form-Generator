@@ -1,6 +1,10 @@
+from __future__ import annotations
+
+import io
 from pathlib import Path
 
 import streamlit as st
+from pypdf import PdfReader, PdfWriter
 
 from ai_backend import generate_all_about_me_profile
 from file_inputs import prepare_upload
@@ -20,22 +24,42 @@ uploaded_files = st.file_uploader(
     help="You can select one or more text, CSV, PDF, or image files.",
 )
 
+if "generated_profiles" not in st.session_state:
+    st.session_state.generated_profiles = []
+
+
+def merge_profiles_pdf(profiles: list[dict]) -> bytes:
+    """Concatenate every filled template into one multi-page PDF."""
+    writer = PdfWriter()
+    for profile in profiles:
+        reader = PdfReader(io.BytesIO(profile["pdf_bytes"]))
+        for page in reader.pages:
+            writer.add_page(page)
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    return buffer.getvalue()
+
+
 if st.button("Generate Profiles", type="primary", use_container_width=True):
     if not uploaded_files:
         st.warning("Upload at least one text, CSV, PDF, or image file first.")
+        st.session_state.generated_profiles = []
+    else:
+        generated: list[dict] = []
+        progress = st.progress(0, text="Starting…")
+        total = len(uploaded_files)
 
-    for uploaded_file in uploaded_files or []:
-        with st.spinner(
-            f"Extracting text and generating profile for {uploaded_file.name}..."
-        ):
+        for index, uploaded_file in enumerate(uploaded_files):
+            progress.progress(
+                index / total,
+                text=f"Creating profile for {uploaded_file.name}…",
+            )
             try:
-                # 1) Extract usable text/image content from the upload.
                 prepared = prepare_upload(
                     file_name=uploaded_file.name,
                     file_bytes=uploaded_file.getvalue(),
                     mime_type=uploaded_file.type,
                 )
-                # 2) Pass that content through the local Ollama pipeline.
                 markdown, pdf_bytes = generate_all_about_me_profile(
                     raw_text=prepared.raw_text,
                     image_bytes=prepared.image_bytes,
@@ -45,14 +69,32 @@ if st.button("Generate Profiles", type="primary", use_container_width=True):
                 st.error(f"Could not create {uploaded_file.name}: {error}")
                 continue
 
-        stem = Path(uploaded_file.name).stem
-        st.subheader(stem)
-        # 3) Show the formatted Markdown profile on screen.
-        st.markdown(markdown)
-        st.download_button(
-            "Download PDF",
-            data=pdf_bytes,
-            file_name=f"{stem}-all-about-me.pdf",
-            mime="application/pdf",
-            key=f"download-{uploaded_file.name}",
-        )
+            stem = Path(uploaded_file.name).stem
+            generated.append(
+                {
+                    "stem": stem,
+                    "markdown": markdown,
+                    "pdf_bytes": pdf_bytes,
+                }
+            )
+
+        progress.progress(1.0, text="Done.")
+        st.session_state.generated_profiles = generated
+
+profiles = st.session_state.generated_profiles
+if profiles:
+    st.success(f"Created {len(profiles)} profile{'s' if len(profiles) != 1 else ''}.")
+    for profile in profiles:
+        with st.expander(profile["stem"], expanded=False):
+            st.markdown(profile["markdown"])
+
+    merged_pdf = merge_profiles_pdf(profiles)
+    st.download_button(
+        "Download all profiles",
+        data=merged_pdf,
+        file_name="all-about-me-profiles.pdf",
+        mime="application/pdf",
+        type="primary",
+        use_container_width=True,
+        key="download-all-profiles",
+    )

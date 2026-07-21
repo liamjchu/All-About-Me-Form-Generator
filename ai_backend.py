@@ -33,14 +33,34 @@ Return ONLY valid JSON (no markdown fences, no commentary) with this shape:
   "bathroom_needs": "",
   "behavioral_management": ""
 }
+
+SOURCE → TEMPLATE mapping (use ONLY these input-form labels; ignore other sections):
+- name: participant name fields only.
+- favorite_things: ONLY "Participant's strengths and favorite interests".
+  Split into up to 3 short list items. Empty strings if none.
+- favorite_reinforcers: ONLY "Favorite reinforcers".
+  Split into up to 4 short list items. Empty strings if none.
+- parent_name / parent_phone / parent_email: parent/guardian contact fields only.
+  Single-line values.
+- allergies: ONLY combine these four source areas into one concise summary:
+  1) "Medications, if taken during camp hours"
+  2) "Does participant have seizures?"
+  3) "Participant allergies(Please include all):"
+  4) "Participant food allergies/dietary restrictions:"
+  If all are blank/none/no, return exactly "N/A".
+- bathroom_needs: ONLY "Does the participant need help in the restroom?".
+  If blank/none/no help needed, return exactly "N/A".
+  Toileting only — never mobility wording (walker, gait, ambulation).
+- behavioral_management: ONLY combine:
+  1) "Participant's areas that can be challenging"
+  2) "Strategies that help with challenges"
+  Concise paragraph (roughly 1–4 sentences). Empty string if neither has content.
+
 Rules:
-- Use only facts explicitly provided in the source text or visible in the image.
-- Never invent details. Use an empty string when unknown.
-- favorite_things: up to 3 short items the person likes.
-- favorite_reinforcers: up to 4 short rewards/motivators (praise, stickers, breaks, etc.).
-  If reinforcers are not stated, leave those strings empty.
-- allergies / bathroom_needs: use "N/A" only when clearly none/not applicable.
-- Keep values short enough to fit on a form line.
+- Use only facts from the mapped source areas above. Never invent or borrow from other fields.
+- Light typo cleanup is allowed; do not change meaning.
+- Page 1 list items stay short (a few words each).
+- Page 2 body fields may be short sentences when the source supports it.
 """
 
 
@@ -173,7 +193,7 @@ def form_data_to_markdown(form_data: dict[str, str]) -> str:
             "## Favorite Reinforcers",
             bullets(reinforcers),
             "",
-            "## Parent(s)/Guardian(s)",
+            "## Parent/Guardian",
             f"- **Name:** {form_data.get('parent_name', '')}",
             f"- **Phone:** {form_data.get('parent_phone', '')}",
             f"- **Email:** {form_data.get('parent_email', '')}",
@@ -206,8 +226,9 @@ def extract_form_data(
         raise ValueError("image_mime_type must be an image MIME type.")
 
     prompt_text = (
-        "Extract All About Me form fields from this participant information "
-        "and return JSON only.\n\n"
+        "Map the labeled input-form answers into the All About Me JSON "
+        "using only the SOURCE → TEMPLATE rules from the system prompt. "
+        "Return JSON only.\n\n"
         f"TEXT SOURCE:\n{text or '[No text source was supplied.]'}"
     )
 
