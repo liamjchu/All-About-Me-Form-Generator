@@ -24,10 +24,10 @@ _FOOTER_HEIGHT_RATIO: float = 0.12
 _FOOTER_MAX_WIDTH: int = 900
 # Vision models read form text well around this size; larger phone photos
 # mostly add glare/noise and slow the request down.
-_VISION_MAX_SIDE: int = 1400
+_VISION_MAX_SIDE: int = 1024
 _VISION_CONTRAST: float = 1.12
 _VISION_SHARPNESS: float = 1.2
-_VISION_JPEG_QUALITY: int = 85
+_VISION_JPEG_QUALITY: int = 75
 
 _PAGE_MARK_RE = re.compile(
     r"(?P<page>\d+)\s*(?:of|/)\s*(?P<total>\d+)",
@@ -45,7 +45,7 @@ _DATE_LINE_RE = re.compile(
 class PreparedInput:
     raw_text: str | None = None
     image_bytes: bytes | None = None
-    image_mime_type: str = "image/png"
+    image_mime_type: str = "image/jpeg"
 
 
 @dataclass(frozen=True)
@@ -213,18 +213,14 @@ def prepare_upload(
     return PreparedInput(raw_text=file_bytes.decode("utf-8", errors="replace"))
 
 
-def _encode_image(image: Image.Image, mime_type: str) -> tuple[bytes, str]:
+def _encode_image(image: Image.Image, mime_type: str | None = None) -> tuple[bytes, str]:
+    """Always JPEG — smaller payloads for Ollama; PNG uploads no longer stay PNG."""
+    del mime_type  # kept for call-site compatibility
     out = io.BytesIO()
-    if mime_type in ("image/jpeg", "image/jpg"):
-        if image.mode != "RGB":
-            image = image.convert("RGB")
-        image.save(out, format="JPEG", quality=_VISION_JPEG_QUALITY)
-        return out.getvalue(), "image/jpeg"
-
-    if image.mode not in ("RGB", "L"):
+    if image.mode != "RGB":
         image = image.convert("RGB")
-    image.save(out, format="PNG")
-    return out.getvalue(), "image/png"
+    image.save(out, format="JPEG", quality=_VISION_JPEG_QUALITY, optimize=True)
+    return out.getvalue(), "image/jpeg"
 
 
 def crop_footer_band(
@@ -338,7 +334,11 @@ def footers_belong_together(marks: Sequence[FooterMark]) -> bool:
         # Readable page marks win: only consecutive pages of the same form pair.
         return all(page == first + offset for offset, page in enumerate(pages))
 
-    # Page OCR failed — require an exact matching date on every page.
+    # No readable page marks. Matching dates still pair; fully blank footers
+    # also pair so upload order + pages_per_form can pack consecutive photos
+    # instead of treating every image as its own slow solo vision call.
+    if not present_dates:
+        return True
     return len(present_dates) == len(marks) and len(set(present_dates)) == 1
 
 
@@ -351,8 +351,9 @@ def group_upload_indices(
     """Group uploads in order into one-profile bundles.
 
     Non-image files stay alone (they already hold a full participant). Image
-    runs are packed into ``pages_per_form``-sized groups when footer cues say
-    the adjacent pages belong together; otherwise each image stays alone.
+    runs are packed into ``pages_per_form``-sized groups when footer cues agree
+    (or are blank — then upload order is trusted). Conflicting dates/page marks
+    keep each image alone.
     """
     if pages_per_form < 1:
         raise ValueError("pages_per_form must be at least 1.")

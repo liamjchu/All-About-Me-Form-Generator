@@ -18,6 +18,7 @@ from pdf_filler import (
     _map_x,
     _na_if_blank_or_none,
     _sanitize_bathroom_needs,
+    _sanitize_reinforcer,
     _template_pdf,
     _wrap_text,
 )
@@ -70,6 +71,46 @@ def test_normalize_form_data_from_lists() -> None:
     assert normalized["behavioral_management"] == "Take breaks."
 
 
+def test_normalize_drops_junk_reinforcers_and_does_not_pad_none() -> None:
+    normalized = normalize_form_data(
+        {
+            "favorite_reinforcers": [
+                "verbal praise",
+                "independent",
+                "none",
+                "N/A",
+            ],
+            "favorite_things": ["soccer", "none", ""],
+        }
+    )
+    assert normalized["reinforcers_1"] == "verbal praise"
+    assert normalized["reinforcers_2"] == ""
+    assert normalized["reinforcers_3"] == ""
+    assert normalized["reinforcers_4"] == ""
+    assert normalized["favorite_things_1"] == "soccer"
+    assert normalized["favorite_things_2"] == ""
+    assert normalized["favorite_things_3"] == ""
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("verbal praise", "verbal praise"),
+        ("stickers", "stickers"),
+        ("none", ""),
+        ("None", ""),
+        ("n/a", ""),
+        ("independent", ""),
+        ("Independently", ""),
+        ("independent walker", ""),
+        ("help in the restroom", ""),
+        ("", ""),
+    ],
+)
+def test_sanitize_reinforcer(raw: str, expected: str) -> None:
+    assert _sanitize_reinforcer(raw) == expected
+
+
 def test_normalize_form_data_flat_keys_and_reinforcers_alias() -> None:
     normalized = normalize_form_data(
         {
@@ -80,7 +121,9 @@ def test_normalize_form_data_flat_keys_and_reinforcers_alias() -> None:
             "bathroom_needs": "Needs help with buttons",
         }
     )
-    assert normalized["favorite_things_2"] == "drums"
+    # Sparse slots are packed forward so empty bullets are not left in between.
+    assert normalized["favorite_things_1"] == "drums"
+    assert normalized["favorite_things_2"] == ""
     assert normalized["reinforcers_4"] == "park"
     assert normalized["allergies"] == "Dairy"
     assert "buttons" in normalized["bathroom_needs"]

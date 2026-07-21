@@ -25,9 +25,10 @@ DEFAULT_MODEL: Final = "llama3.2:latest"
 DEFAULT_VISION_MODEL: Final = "qwen2.5vl:7b"
 # Keep context modest — the default 128k window on qwen2.5vl is far larger
 # than one/two form photos need and slows every token.
-DEFAULT_NUM_CTX: Final = 8192
-DEFAULT_NUM_PREDICT: Final = 700
-VISION_JPEG_QUALITY: Final = 85
+# 4k context is enough for one/two form photos + the system prompt.
+DEFAULT_NUM_CTX: Final = 4096
+DEFAULT_NUM_PREDICT: Final = 500
+VISION_JPEG_QUALITY: Final = 75
 
 SYSTEM_PROMPT: Final = """You extract participant facts for an All About Me PDF form.
 Return ONLY valid JSON (no markdown fences, no commentary) with this shape:
@@ -46,9 +47,13 @@ Return ONLY valid JSON (no markdown fences, no commentary) with this shape:
 SOURCE → TEMPLATE mapping (use ONLY these input-form labels; ignore other sections):
 - name: participant name fields only.
 - favorite_things: ONLY "Participant's strengths and favorite interests".
-  Split into up to 3 short list items. Empty strings if none.
-- favorite_reinforcers: ONLY "Favorite reinforcers".
-  Split into up to 4 short list items. Empty strings if none.
+  Split into up to 3 short list items. Use fewer items if needed; unused slots "".
+  Never pad with "none", "n/a", or "independent".
+- favorite_reinforcers: ONLY "Favorite reinforcers" (rewards / motivators such as
+  praise, stickers, breaks, snacks, preferred activities).
+  Split into up to 4 short list items. Use fewer items if needed; unused slots "".
+  Never invent items. Never copy words from other sections (bathroom, strengths,
+  mobility, independence). Never pad with "none", "n/a", "no", or "independent".
 - parent_name / parent_phone / parent_email: parent/guardian contact fields only.
   Single-line values.
 - allergies: ONLY combine these four source areas into one concise summary:
@@ -231,6 +236,12 @@ def _image_to_jpeg_b64(image_bytes: bytes) -> str:
     return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
+def _footer_vision_fallback_enabled() -> bool:
+    """Opt-in only — vision footer reads add minutes per image on laptop GPUs."""
+    raw = (_env_or_dotenv("FOOTER_VISION_FALLBACK", "0") or "0").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def extract_footer_mark(
     footer_image_bytes: bytes,
     *,
@@ -238,8 +249,10 @@ def extract_footer_mark(
 ) -> FooterMark:
     """Read bottom-left date and bottom-right page mark from a footer crop.
 
-    Uses local Tesseract OCR first (seconds). Falls back to the vision model
-    only when OCR finds nothing usable.
+    Uses local Tesseract OCR (seconds). Vision fallback is off by default
+    because a failed OCR on a 30-image batch would otherwise add ~30 slow
+    Ollama calls before generation even starts. Set FOOTER_VISION_FALLBACK=1
+    to re-enable it.
     """
     if not footer_image_bytes:
         return FooterMark()
@@ -249,6 +262,9 @@ def extract_footer_mark(
     ocr_mark = extract_footer_mark_ocr(footer_image_bytes)
     if ocr_mark.page is not None or ocr_mark.date_line:
         return ocr_mark
+
+    if not _footer_vision_fallback_enabled():
+        return FooterMark()
 
     raw = _chat(
         _vision_model(),

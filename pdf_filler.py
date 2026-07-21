@@ -119,6 +119,13 @@ def normalize_form_data(raw: dict) -> dict[str, str]:
         key = f"favorite_things_{index}"
         if isinstance(raw.get(key), str) and raw[key].strip():
             data[key] = raw[key].strip()
+    _assign_packed_list(
+        data,
+        prefix="favorite_things",
+        count=3,
+        values=[data[f"favorite_things_{i}"] for i in range(1, 4)],
+        sanitize=_sanitize_list_bullet,
+    )
 
     reinforcers = raw.get("favorite_reinforcers") or raw.get("reinforcers")
     if isinstance(reinforcers, list):
@@ -128,6 +135,13 @@ def normalize_form_data(raw: dict) -> dict[str, str]:
         key = f"reinforcers_{index}"
         if isinstance(raw.get(key), str) and raw[key].strip():
             data[key] = raw[key].strip()
+    _assign_packed_list(
+        data,
+        prefix="reinforcers",
+        count=4,
+        values=[data[f"reinforcers_{i}"] for i in range(1, 5)],
+        sanitize=_sanitize_reinforcer,
+    )
 
     for key in (
         "parent_name",
@@ -146,6 +160,64 @@ def normalize_form_data(raw: dict) -> dict[str, str]:
     data["bathroom_needs"] = _na_if_blank_or_none(data["bathroom_needs"])
 
     return data
+
+
+def _assign_packed_list(
+    data: dict[str, str],
+    *,
+    prefix: str,
+    count: int,
+    values: list[str],
+    sanitize,
+) -> None:
+    """Keep only usable bullets, pack them to the front, leave the rest blank."""
+    packed = [cleaned for value in values if (cleaned := sanitize(value))]
+    for index in range(1, count + 1):
+        data[f"{prefix}_{index}"] = packed[index - 1] if index <= len(packed) else ""
+
+
+def _is_placeholder_bullet(text: str) -> bool:
+    return bool(
+        re.fullmatch(
+            r"(?:n/?a|none|no|nil|nill|not\s+applicable|nothing|empty|-|—|–)"
+            r"(?:\s*[.!]*)?",
+            text.strip(),
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _sanitize_list_bullet(text: str) -> str:
+    """Drop blank / none-style fillers from page-1 bullet lists."""
+    cleaned = (text or "").strip(" \t\r\n,;.-")
+    if not cleaned or _is_placeholder_bullet(cleaned):
+        return ""
+    return cleaned
+
+
+def _sanitize_reinforcer(text: str) -> str:
+    """Keep real reinforcers; drop placeholders and off-field bleed (e.g. independent)."""
+    cleaned = _sanitize_list_bullet(text)
+    if not cleaned:
+        return ""
+    # Bare independence / mobility answers are not reinforcers.
+    if re.fullmatch(
+        r"(?:independent(?:ly)?|independence|independent\s+walker|"
+        r"walker|ambulat(?:e|es|ion|ory)|gait|"
+        r"(?:no\s+)?help\s+needed|does\s+not\s+need\s+help)"
+        r"(?:\s*[.!]*)?",
+        cleaned,
+        flags=re.IGNORECASE,
+    ):
+        return ""
+    # Phrases that clearly belong to bathroom / mobility sections.
+    if re.search(
+        r"\b(?:walker|ambulat(?:e|es|ion|ory)|gait|restroom|bathroom|toileting)\b",
+        cleaned,
+        flags=re.IGNORECASE,
+    ):
+        return ""
+    return cleaned
 
 
 def _na_if_blank_or_none(text: str) -> str:

@@ -214,6 +214,29 @@ def test_extract_form_data_multiple_images(
     assert len(images) == 2
 
 
+def test_extract_footer_mark_skips_vision_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ai_backend import extract_footer_mark
+
+    called = {"chat": False}
+
+    def _fail_chat(*_args, **_kwargs):  # noqa: ANN001
+        called["chat"] = True
+        raise AssertionError("vision fallback must stay off by default")
+
+    monkeypatch.delenv("FOOTER_VISION_FALLBACK", raising=False)
+    monkeypatch.setattr(ai_backend, "_chat", _fail_chat)
+    monkeypatch.setattr(
+        ai_backend,
+        "extract_footer_mark_ocr",
+        lambda _bytes: FooterMark(),
+    )
+    mark = extract_footer_mark(make_png_bytes(), image_mime_type="image/png")
+    assert mark == FooterMark()
+    assert called["chat"] is False
+
+
 def test_extract_footer_mark_reads_page_and_date(
     monkeypatch: pytest.MonkeyPatch, ollama_server: str
 ) -> None:
@@ -228,6 +251,12 @@ def test_extract_footer_mark_reads_page_and_date(
     )
     monkeypatch.setenv("OLLAMA_BASE_URL", ollama_server)
     monkeypatch.setenv("OLLAMA_VISION_MODEL", "test-vision")
+    monkeypatch.setenv("FOOTER_VISION_FALLBACK", "1")
+    monkeypatch.setattr(
+        ai_backend,
+        "extract_footer_mark_ocr",
+        lambda _bytes: FooterMark(),
+    )
     mark = extract_footer_mark(make_png_bytes(), image_mime_type="image/png")
     assert mark.date_line == "Jun 30 2026 1:21PM ET"
     assert mark.page == 45

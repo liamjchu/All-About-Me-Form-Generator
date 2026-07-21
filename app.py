@@ -10,6 +10,7 @@ from eta import (
     PREP_TEXT_SECONDS,
     EtaTracker,
     estimate_batch_seconds,
+    run_with_heartbeat,
 )
 from file_inputs import (
     FooterMark,
@@ -19,6 +20,9 @@ from file_inputs import (
     prepare_upload,
 )
 from pdf_filler import merge_profiles_pdf
+
+# Prep is quick; most wall time is the local vision model call(s).
+_PREP_SHARE = 0.15
 
 st.set_page_config(page_title="All About Me Profile Generator", page_icon="✨")
 
@@ -46,8 +50,13 @@ one file → one profile.
 **Tip:** Photograph each page clearly — fill the frame, keep it sharp and well
 lit, and avoid glare or blur so the printed text (including the footer) is easy
 to read.
+
+**Progress tip:** After photos are prepared, the bar may sit for a while on
+“Creating profile…” while the local vision model reads the pages. That step is
+working — it often takes about a minute per participant on a laptop.
 """
     )
+
 
 uploaded_files = st.file_uploader(
     "Upload participant information",
@@ -103,7 +112,7 @@ if st.button("Generate Profiles", type="primary", use_container_width=True):
         total_files = len(uploaded_files)
         for index, uploaded_file in enumerate(uploaded_files):
             status = f"Reading {uploaded_file.name}…"
-            refresh_progress(index / max(total_files * 2, 1), status)
+            refresh_progress(_PREP_SHARE * (index / max(total_files, 1)), status)
             try:
                 prepared = prepare_upload(
                     file_name=uploaded_file.name,
@@ -141,14 +150,17 @@ if st.button("Generate Profiles", type="primary", use_container_width=True):
                 footers.append(None)
                 eta.add_completed(PREP_TEXT_SECONDS)
 
-            refresh_progress((index + 1) / max(total_files * 2, 1), status)
+            refresh_progress(
+                _PREP_SHARE * ((index + 1) / max(total_files, 1)),
+                status,
+            )
 
         groups = group_upload_indices(
             is_image=is_image,
             footers=footers,
             pages_per_form=int(pages_per_form),
         )
-        group_total = len(groups)
+        group_total = max(len(groups), 1)
         vision_groups = 0
         text_groups = 0
         for indices in groups:
@@ -162,16 +174,15 @@ if st.button("Generate Profiles", type="primary", use_container_width=True):
             + text_groups * GEN_TEXT_SECONDS
         )
 
+        gen_span = 1.0 - _PREP_SHARE
         for group_index, indices in enumerate(groups):
             group_names = [names[i] for i in indices]
             group_prepared = [prepared_list[i] for i in indices]
             group_footers = [footers[i] for i in indices]
             label = group_label(file_names=group_names, footers=group_footers)
-            status = f"Creating profile for {label}…"
-            refresh_progress(
-                0.5 + (group_index / max(group_total * 2, 1)),
-                status,
-            )
+            status_prefix = f"Creating profile for {label}"
+            base = _PREP_SHARE + gen_span * (group_index / group_total)
+            slice_span = gen_span / group_total
 
             text_parts = [
                 part.raw_text.strip()
@@ -183,18 +194,36 @@ if st.button("Generate Profiles", type="primary", use_container_width=True):
                 for part in group_prepared
                 if part.image_bytes
             ]
+            expected = GEN_VISION_SECONDS if images else GEN_TEXT_SECONDS
+            joined_text = "\n\n".join(text_parts) if text_parts else None
+            image_list = images or None
+
+            def on_tick(elapsed: float, within: float) -> None:
+                # Credit wall time into the current slice so ETA counts down
+                # while the model runs (capped just shy of full until done).
+                eta.set_provisional(min(elapsed, expected * 0.98))
+                refresh_progress(
+                    base + slice_span * within,
+                    f"{status_prefix} ({int(elapsed)}s — local AI reading photos…)",
+                )
+
             try:
-                markdown, pdf_bytes = generate_all_about_me_profile(
-                    raw_text="\n\n".join(text_parts) if text_parts else None,
-                    images=images or None,
+                markdown, pdf_bytes = run_with_heartbeat(
+                    lambda joined_text=joined_text, image_list=image_list: (
+                        generate_all_about_me_profile(
+                            raw_text=joined_text,
+                            images=image_list,
+                        )
+                    ),
+                    on_tick=on_tick,
+                    expected_seconds=expected,
+                    poll_seconds=0.8,
                 )
             except (RuntimeError, ValueError) as error:
                 joined = ", ".join(group_names)
                 st.error(f"Could not create profile from {joined}: {error}")
                 # Still count planned work so the ETA does not stall forever.
-                eta.add_completed(
-                    GEN_VISION_SECONDS if images else GEN_TEXT_SECONDS
-                )
+                eta.add_completed(expected)
                 continue
 
             generated.append(
@@ -205,10 +234,10 @@ if st.button("Generate Profiles", type="primary", use_container_width=True):
                     "sources": group_names,
                 }
             )
-            eta.add_completed(GEN_VISION_SECONDS if images else GEN_TEXT_SECONDS)
+            eta.add_completed(expected)
             refresh_progress(
-                0.5 + ((group_index + 1) / max(group_total * 2, 1)),
-                status,
+                _PREP_SHARE + gen_span * ((group_index + 1) / group_total),
+                f"{status_prefix} — done",
             )
 
         eta_box.success("Ready — you can download your files below.")

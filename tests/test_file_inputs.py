@@ -92,9 +92,10 @@ def test_prepare_upload_png_by_mime() -> None:
         mime_type="image/png",
     )
     assert prepared.image_bytes is not None
-    assert prepared.image_mime_type == "image/png"
+    assert prepared.image_mime_type == "image/jpeg"
     assert prepared.raw_text is None
     with Image.open(io.BytesIO(prepared.image_bytes)) as image:
+        assert image.format == "JPEG"
         assert image.size == (64, 64)
 
 
@@ -157,7 +158,7 @@ def test_normalize_image_rotates_sideways_document() -> None:
         buffer.getvalue(),
         mime_type="image/png",
     )
-    assert mime == "image/png"
+    assert mime == "image/jpeg"
     with Image.open(io.BytesIO(fixed_bytes)) as fixed:
         # Should be portrait again (taller than wide), matching the source form.
         assert fixed.size[1] > fixed.size[0]
@@ -175,7 +176,7 @@ def test_enhance_form_photo_downscales_large_pages() -> None:
     draw = ImageDraw.Draw(huge)
     draw.rectangle((40, 40, 3100, 80), fill=(20, 20, 20))
     enhanced = enhance_form_photo(huge)
-    assert max(enhanced.size) == 1400
+    assert max(enhanced.size) == 1024
 
 
 def test_normalize_image_downscales_large_upload() -> None:
@@ -192,7 +193,7 @@ def test_normalize_image_downscales_large_upload() -> None:
     )
     assert mime == "image/jpeg"
     with Image.open(io.BytesIO(fixed_bytes)) as fixed:
-        assert max(fixed.size) == 1400
+        assert max(fixed.size) == 1024
 
 
 def test_parse_footer_ocr_text_reads_date_and_page() -> None:
@@ -229,7 +230,7 @@ def test_extract_footer_mark_ocr_reads_printed_footer() -> None:
 def test_crop_footer_band_is_shorter_than_source() -> None:
     png = make_png_bytes(size=(200, 400))
     footer_bytes, mime = crop_footer_band(png, mime_type="image/png")
-    assert mime == "image/png"
+    assert mime == "image/jpeg"
     with Image.open(io.BytesIO(png)) as source, Image.open(io.BytesIO(footer_bytes)) as footer:
         assert footer.size[1] < source.size[1]
         assert footer.size[0] <= source.size[0]
@@ -274,6 +275,19 @@ def test_footers_belong_together_uses_matching_dates_when_pages_missing() -> Non
             FooterMark(date_line="Jul 1 2026 9:00AM ET", page=None, total=None),
         ]
     )
+
+
+def test_footers_belong_together_blank_marks_trust_upload_order() -> None:
+    assert footers_belong_together([FooterMark(), FooterMark()])
+
+
+def test_group_upload_indices_pairs_blank_footers_by_pages_per_form() -> None:
+    groups = group_upload_indices(
+        is_image=[True, True, True, True],
+        footers=[FooterMark(), FooterMark(), FooterMark(), FooterMark()],
+        pages_per_form=2,
+    )
+    assert groups == [[0, 1], [2, 3]]
 
 
 def test_group_upload_indices_pairs_consecutive_form_pages() -> None:
