@@ -302,7 +302,7 @@ def _draw_bullet_line(
     """Draw a bullet and text for a filled row; skip empty rows."""
     if not text.strip():
         return
-    x0, y0, x1, y1 = _map_box(cover_box, size)
+    _, y0, x1, y1 = _map_box(cover_box, size)
 
     box_x0_preview = cover_box[0]
     text_x = _map_x(box_x0_preview + _PAGE1_BULLET_TEXT_FROM_BOX_X, size)
