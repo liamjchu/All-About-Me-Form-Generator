@@ -363,6 +363,18 @@ def _extract_page_images() -> list[Image.Image]:
     return images
 
 
+def merge_profiles_pdf(profiles: list[dict]) -> bytes:
+    """Concatenate every filled template into one multi-page PDF."""
+    writer = PdfWriter()
+    for profile in profiles:
+        reader = PdfReader(io.BytesIO(profile["pdf_bytes"]))
+        for page in reader.pages:
+            writer.add_page(page)
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    return buffer.getvalue()
+
+
 def fill_form_pdf(form_data: dict[str, str]) -> bytes:
     """Return a filled PDF (bytes) based on All About Me Template.pdf."""
     data = normalize_form_data(form_data)

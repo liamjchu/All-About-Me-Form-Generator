@@ -13,3 +13,9 @@ env/
 
 # Local PDF calibration previews
 _pdf_preview/
+
+# Test / coverage artifacts
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/

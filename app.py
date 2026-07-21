@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import io
 from pathlib import Path
 
 import streamlit as st
-from pypdf import PdfReader, PdfWriter
 
 from ai_backend import generate_all_about_me_profile
 from file_inputs import prepare_upload
+from pdf_filler import merge_profiles_pdf
 
 st.set_page_config(page_title="All About Me Profile Generator", page_icon="✨")
 
@@ -26,18 +25,6 @@ uploaded_files = st.file_uploader(
 
 if "generated_profiles" not in st.session_state:
     st.session_state.generated_profiles = []
-
-
-def merge_profiles_pdf(profiles: list[dict]) -> bytes:
-    """Concatenate every filled template into one multi-page PDF."""
-    writer = PdfWriter()
-    for profile in profiles:
-        reader = PdfReader(io.BytesIO(profile["pdf_bytes"]))
-        for page in reader.pages:
-            writer.add_page(page)
-    buffer = io.BytesIO()
-    writer.write(buffer)
-    return buffer.getvalue()
 
 
 if st.button("Generate Profiles", type="primary", use_container_width=True):
