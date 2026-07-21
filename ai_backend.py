@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import re
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Final
+from typing import Final, Sequence
 
+from PIL import Image
+
+from file_inputs import FooterMark, extract_footer_mark_ocr, normalize_date_line
 from pdf_filler import fill_form_pdf, normalize_form_data
 
 PROJECT_ROOT: Final = Path(__file__).resolve().parent
@@ -18,7 +22,12 @@ PROJECT_ROOT: Final = Path(__file__).resolve().parent
 # Local Ollama native API. No cloud API key required.
 DEFAULT_BASE_URL: Final = "http://127.0.0.1:11434"
 DEFAULT_MODEL: Final = "llama3.2:latest"
-DEFAULT_VISION_MODEL: Final = "llava:7b"
+DEFAULT_VISION_MODEL: Final = "qwen2.5vl:7b"
+# Keep context modest — the default 128k window on qwen2.5vl is far larger
+# than one/two form photos need and slows every token.
+DEFAULT_NUM_CTX: Final = 8192
+DEFAULT_NUM_PREDICT: Final = 700
+VISION_JPEG_QUALITY: Final = 85
 
 SYSTEM_PROMPT: Final = """You extract participant facts for an All About Me PDF form.
 Return ONLY valid JSON (no markdown fences, no commentary) with this shape:
@@ -58,9 +67,25 @@ SOURCE → TEMPLATE mapping (use ONLY these input-form labels; ignore other sect
 
 Rules:
 - Use only facts from the mapped source areas above. Never invent or borrow from other fields.
+- Printed and handwritten answers both count. Read carefully through glare, shadow,
+  or slight blur when the text is still legible.
+- If a printed label is hard to read but the filled answer clearly sits in that
+  field's usual place on the form, still extract it into the matching JSON key.
 - Light typo cleanup is allowed; do not change meaning.
+- Prefer a best-effort partial fill over empty strings when some mapped fields
+  are readable and others are not.
 - Page 1 list items stay short (a few words each).
 - Page 2 body fields may be short sentences when the source supports it.
+- When multiple images are provided, they are consecutive pages of ONE participant
+  form — merge facts across pages into a single JSON object.
+"""
+
+FOOTER_PROMPT: Final = """Read only the printed footer in this image crop.
+Bottom-left usually has a timestamp like "Jun 30 2026 1:21PM ET".
+Bottom-right usually has a page mark like "45 of 85" or "45/85".
+Return ONLY JSON with this shape:
+{"date_line": "Jun 30 2026 1:21PM ET", "page": 45, "total": 85}
+Copy date_line exactly as printed. Use null for any field you cannot read.
 """
 
 
@@ -106,14 +131,25 @@ def _vision_model() -> str:
     )
 
 
-def _chat(model: str, messages: list[dict[str, object]]) -> str:
+def _chat(
+    model: str,
+    messages: list[dict[str, object]],
+    *,
+    num_predict: int = DEFAULT_NUM_PREDICT,
+    num_ctx: int = DEFAULT_NUM_CTX,
+) -> str:
     """Call Ollama's /api/chat endpoint and return the assistant text."""
     payload = {
         "model": model,
         "messages": messages,
         "stream": False,
         "format": "json",
-        "options": {"temperature": 0.1, "num_predict": 900},
+        "keep_alive": "30m",
+        "options": {
+            "temperature": 0.1,
+            "num_predict": num_predict,
+            "num_ctx": num_ctx,
+        },
     }
     request = urllib.request.Request(
         f"{_base_url()}/api/chat",
@@ -144,7 +180,7 @@ def _chat(model: str, messages: list[dict[str, object]]) -> str:
     return content
 
 
-def _parse_form_json(raw: str) -> dict[str, str]:
+def _parse_json_object(raw: str) -> dict:
     text = raw.strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
@@ -160,7 +196,85 @@ def _parse_form_json(raw: str) -> dict[str, str]:
         parsed = json.loads(match.group(0))
     if not isinstance(parsed, dict):
         raise RuntimeError("The model JSON was not an object.")
-    return normalize_form_data(parsed)
+    return parsed
+
+
+def _parse_form_json(raw: str) -> dict[str, str]:
+    return normalize_form_data(_parse_json_object(raw))
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        match = re.search(r"\d+", cleaned)
+        if match:
+            return int(match.group(0))
+    return None
+
+
+def _image_to_jpeg_b64(image_bytes: bytes) -> str:
+    """Re-encode as compact JPEG so vision requests stay small/fast."""
+    with Image.open(io.BytesIO(image_bytes)) as opened:
+        image = opened.convert("RGB")
+        buffer = io.BytesIO()
+        image.save(buffer, format="JPEG", quality=VISION_JPEG_QUALITY, optimize=True)
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def extract_footer_mark(
+    footer_image_bytes: bytes,
+    *,
+    image_mime_type: str = "image/png",
+) -> FooterMark:
+    """Read bottom-left date and bottom-right page mark from a footer crop.
+
+    Uses local Tesseract OCR first (seconds). Falls back to the vision model
+    only when OCR finds nothing usable.
+    """
+    if not footer_image_bytes:
+        return FooterMark()
+    if not image_mime_type.startswith("image/"):
+        raise ValueError("image_mime_type must be an image MIME type.")
+
+    ocr_mark = extract_footer_mark_ocr(footer_image_bytes)
+    if ocr_mark.page is not None or ocr_mark.date_line:
+        return ocr_mark
+
+    raw = _chat(
+        _vision_model(),
+        [
+            {"role": "system", "content": FOOTER_PROMPT},
+            {
+                "role": "user",
+                "content": "Return the footer JSON only.",
+                "images": [_image_to_jpeg_b64(footer_image_bytes)],
+            },
+        ],
+        num_predict=80,
+        num_ctx=2048,
+    )
+    try:
+        parsed = _parse_json_object(raw)
+    except (RuntimeError, json.JSONDecodeError):
+        return FooterMark()
+
+    date_raw = parsed.get("date_line")
+    date_line = normalize_date_line(date_raw if isinstance(date_raw, str) else None)
+    return FooterMark(
+        date_line=date_line,
+        page=_optional_int(parsed.get("page")),
+        total=_optional_int(parsed.get("total")),
+    )
 
 
 def form_data_to_markdown(form_data: dict[str, str]) -> str:
@@ -216,26 +330,56 @@ def extract_form_data(
     *,
     image_bytes: bytes | None = None,
     image_mime_type: str = "image/png",
+    images: Sequence[tuple[bytes, str]] | None = None,
 ) -> dict[str, str]:
-    """Run Ollama extraction and return normalized form fields."""
-    text = raw_text.strip() if raw_text else ""
-    has_image = bool(image_bytes)
-    if not text and not has_image:
-        raise ValueError("Provide raw_text, image_bytes, or both.")
-    if has_image and not image_mime_type.startswith("image/"):
-        raise ValueError("image_mime_type must be an image MIME type.")
+    """Run Ollama extraction and return normalized form fields.
 
-    prompt_text = (
-        "Map the labeled input-form answers into the All About Me JSON "
-        "using only the SOURCE → TEMPLATE rules from the system prompt. "
-        "Return JSON only.\n\n"
-        f"TEXT SOURCE:\n{text or '[No text source was supplied.]'}"
-    )
+    ``images`` is a sequence of ``(image_bytes, mime_type)`` for multi-page
+    photo uploads. ``image_bytes`` remains a single-image convenience.
+    """
+    text = raw_text.strip() if raw_text else ""
+    image_list: list[tuple[bytes, str]] = []
+    if images:
+        image_list.extend(images)
+    elif image_bytes:
+        image_list.append((image_bytes, image_mime_type))
+
+    if not text and not image_list:
+        raise ValueError("Provide raw_text, image_bytes, or images.")
+    for _, mime in image_list:
+        if not mime.startswith("image/"):
+            raise ValueError("image_mime_type must be an image MIME type.")
+
+    page_note = ""
+    if len(image_list) > 1:
+        page_note = (
+            f" There are {len(image_list)} page images for one participant; "
+            "merge facts across all of them."
+        )
+
+    if image_list:
+        prompt_text = (
+            "These are photo(s) of a filled participant intake form. "
+            "Read printed and handwritten answers carefully, then map them "
+            "into the All About Me JSON using the SOURCE → TEMPLATE rules. "
+            "Extract every mapped field you can read; leave a field empty only "
+            f"when that answer is truly missing or illegible. Return JSON only."
+            f"{page_note}"
+        )
+        if text:
+            prompt_text += f"\n\nADDITIONAL TEXT SOURCE:\n{text}"
+    else:
+        prompt_text = (
+            "Map the labeled input-form answers into the All About Me JSON "
+            "using only the SOURCE → TEMPLATE rules from the system prompt. "
+            "Return JSON only.\n\n"
+            f"TEXT SOURCE:\n{text or '[No text source was supplied.]'}"
+        )
 
     user_message: dict[str, object] = {"role": "user", "content": prompt_text}
-    if has_image:
+    if image_list:
         # Ollama vision models expect raw base64 image strings (no data: URL).
-        user_message["images"] = [base64.b64encode(image_bytes).decode("ascii")]
+        user_message["images"] = [_image_to_jpeg_b64(data) for data, _ in image_list]
         model = _vision_model()
     else:
         model = _text_model()
@@ -246,6 +390,8 @@ def extract_form_data(
             {"role": "system", "content": SYSTEM_PROMPT},
             user_message,
         ],
+        num_ctx=DEFAULT_NUM_CTX if image_list else 4096,
+        num_predict=DEFAULT_NUM_PREDICT,
     )
     form_data = _parse_form_json(model_text)
     if not form_data.get("name") and not any(
@@ -262,17 +408,19 @@ def generate_all_about_me_profile(
     *,
     image_bytes: bytes | None = None,
     image_mime_type: str = "image/png",
+    images: Sequence[tuple[bytes, str]] | None = None,
 ) -> tuple[str, bytes]:
     """Return Markdown preview text and a filled formTemplate.pdf.
 
     Talks to a local Ollama server (default ``http://127.0.0.1:11434``).
     Text uploads use ``OLLAMA_MODEL`` (default ``llama3.2:latest``).
-    Image uploads use ``OLLAMA_VISION_MODEL`` (default ``llava:7b``).
+    Image uploads use ``OLLAMA_VISION_MODEL`` (default ``qwen2.5vl:7b``).
     """
     form_data = extract_form_data(
         raw_text,
         image_bytes=image_bytes,
         image_mime_type=image_mime_type,
+        images=images,
     )
     return form_data_to_markdown(form_data), fill_form_pdf(form_data)
 
@@ -282,11 +430,13 @@ def generate_all_about_me_pdf(
     *,
     image_bytes: bytes | None = None,
     image_mime_type: str = "image/png",
+    images: Sequence[tuple[bytes, str]] | None = None,
 ) -> bytes:
     """Return only the filled PDF (convenience wrapper)."""
     _, pdf_bytes = generate_all_about_me_profile(
         raw_text,
         image_bytes=image_bytes,
         image_mime_type=image_mime_type,
+        images=images,
     )
     return pdf_bytes

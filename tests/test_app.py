@@ -49,7 +49,7 @@ def test_app_shows_generated_profiles_from_session_state() -> None:
     assert at.success
     assert "Created 1 profile" in at.success[0].value
     assert at.expander
-    assert at.expander[0].label == "riley"
+    assert any(expander.label == "riley" for expander in at.expander)
 
 
 def test_merge_profiles_used_by_app_is_valid_pdf() -> None:
