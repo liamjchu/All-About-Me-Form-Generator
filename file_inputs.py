@@ -1,18 +1,21 @@
-"""Helpers for turning uploaded files into text/images the AI backend can use."""
+"""Helpers for turning uploaded PDFs into text the AI backend can use."""
 
 from __future__ import annotations
 
 import io
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Final
 
 from pypdf import PdfReader
+
+# Keep in sync with .streamlit/config.toml server.maxUploadSize (MB).
+MAX_UPLOAD_BYTES: Final = 10 * 1024 * 1024
 
 
 @dataclass(frozen=True)
 class PreparedInput:
-    raw_text: str | None = None
-    image_bytes: bytes | None = None
-    image_mime_type: str = "image/png"
+    raw_text: str
 
 
 def extract_text_from_pdf(pdf_bytes: bytes) -> str:
@@ -35,9 +38,15 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> str:
     if not combined:
         raise ValueError(
             "This PDF has no extractable text (it may be a scanned image). "
-            "Upload a text PDF, or a PNG/JPG of the page instead."
+            "Upload a text-based PDF instead."
         )
     return combined
+
+
+def is_pdf_upload(*, file_name: str, mime_type: str | None) -> bool:
+    name = file_name.lower()
+    mime = (mime_type or "").lower()
+    return mime == "application/pdf" or name.endswith(".pdf")
 
 
 def prepare_upload(
@@ -46,18 +55,16 @@ def prepare_upload(
     file_bytes: bytes,
     mime_type: str | None,
 ) -> PreparedInput:
-    """Normalize an uploaded file into text and/or image input for generation."""
-    name = file_name.lower()
-    mime = (mime_type or "").lower()
-
-    if mime.startswith("image/") or name.endswith((".png", ".jpg", ".jpeg")):
-        return PreparedInput(
-            image_bytes=file_bytes,
-            image_mime_type=mime if mime.startswith("image/") else "image/png",
+    """Extract text from an uploaded PDF for generation."""
+    if not is_pdf_upload(file_name=file_name, mime_type=mime_type):
+        raise ValueError("Only PDF uploads are supported.")
+    if len(file_bytes) > MAX_UPLOAD_BYTES:
+        raise ValueError(
+            f"PDF exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB size limit."
         )
+    return PreparedInput(raw_text=extract_text_from_pdf(file_bytes))
 
-    if mime == "application/pdf" or name.endswith(".pdf"):
-        return PreparedInput(raw_text=extract_text_from_pdf(file_bytes))
 
-    # txt / csv / other text-like uploads
-    return PreparedInput(raw_text=file_bytes.decode("utf-8", errors="replace"))
+def profile_stem(file_name: str) -> str:
+    """Human-readable label for a profile built from one PDF."""
+    return Path(file_name).stem

@@ -1,0 +1,12 @@
+# Example TLS reverse proxy in front of the local Streamlit app.
+# Requires Caddy (https://caddyserver.com). Replace the host name and keep
+# Streamlit bound to 127.0.0.1 (see .streamlit/config.toml).
+#
+#   caddy run --config deploy/Caddyfile
+#
+# For a LAN hostname without public DNS, use an internal CA or tls internal.
+
+forms.example.local {
+	tls internal
+	reverse_proxy 127.0.0.1:8501
+}

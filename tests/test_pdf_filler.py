@@ -1,0 +1,436 @@
+"""Tests for PDF form filling and field normalization (uses real template PDF)."""
+
+from __future__ import annotations
+
+import io
+from pathlib import Path
+
+import pytest
+from pypdf import PdfReader
+
+import pdf_filler
+from pdf_filler import (
+    empty_form_data,
+    fill_form_pdf,
+    merge_profiles_pdf,
+    normalize_form_data,
+    participant_first_name_from_text,
+    _map_box,
+    _map_x,
+    _na_if_blank_or_none,
+    _naturalize_medical_summary,
+    _sanitize_bathroom_needs,
+    _sanitize_favorite_thing,
+    _sanitize_reinforcer,
+    _sanitize_single_parent_contact,
+    _template_pdf,
+    _wrap_text,
+)
+from PIL import Image, ImageDraw
+
+
+def test_template_pdf_resolves_project_file() -> None:
+    path = _template_pdf()
+    assert path.is_file()
+    assert path.name in {"formTemplate.pdf", "All About Me Template.pdf"}
+
+
+def test_template_pdf_missing_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(pdf_filler, "PROJECT_ROOT", tmp_path)
+    with pytest.raises(RuntimeError, match="PDF template not found"):
+        _template_pdf()
+
+
+def test_empty_form_data_has_all_keys() -> None:
+    data = empty_form_data()
+    assert data["name"] == ""
+    assert data["favorite_things_3"] == ""
+    assert data["reinforcers_3"] == ""
+    assert "reinforcers_4" not in data
+    assert data["behavioral_management"] == ""
+    assert len(data) == 13
+
+
+def test_normalize_form_data_from_lists() -> None:
+    normalized = normalize_form_data(
+        {
+            "name": "  Avery Quinn  ",
+            "favorite_things": ["art", "reading", "puzzles", "ignored"],
+            "favorite_reinforcers": ["hugs", "music"],
+            "parent_name": "Jamie",
+            "parent_phone": "555-0111",
+            "parent_email": "jamie@example.com",
+            "allergies": "none",
+            "bathroom_needs": "independent walker",
+            "behavioral_management": "Take breaks.",
+        }
+    )
+    assert normalized["name"] == "Avery"
+    # Favorites pack into 2 bullets, combining across both (not only the last).
+    assert normalized["favorite_things_1"] == "art, reading"
+    assert normalized["favorite_things_2"] == "puzzles, ignored"
+    assert normalized["favorite_things_3"] == ""
+    assert normalized["reinforcers_1"] == "hugs"
+    assert normalized["reinforcers_2"] == "music"
+    assert normalized["reinforcers_3"] == ""
+    assert "reinforcers_4" not in normalized
+    assert normalized["allergies"] == "N/A"
+    assert normalized["bathroom_needs"] == "N/A"
+    assert normalized["behavioral_management"] == "Take breaks."
+
+
+def test_normalize_drops_junk_reinforcers_and_does_not_pad_none() -> None:
+    normalized = normalize_form_data(
+        {
+            "favorite_reinforcers": [
+                "verbal praise",
+                "independent",
+                "none",
+                "N/A",
+            ],
+            "favorite_things": ["soccer", "none", ""],
+        }
+    )
+    assert normalized["reinforcers_1"] == "verbal praise"
+    assert normalized["reinforcers_2"] == ""
+    assert normalized["reinforcers_3"] == ""
+    assert normalized["favorite_things_1"] == "soccer"
+    assert normalized["favorite_things_2"] == ""
+    assert normalized["favorite_things_3"] == ""
+
+
+def test_normalize_drops_diagnosis_bleed_from_favorite_things() -> None:
+    """N/A favorites must stay blank — diagnoses must not fill the slots."""
+    normalized = normalize_form_data(
+        {
+            "favorite_things": ["N/A", "autism", "ID"],
+            "favorite_reinforcers": ["none", "intellectual disability", ""],
+        }
+    )
+    assert normalized["favorite_things_1"] == ""
+    assert normalized["favorite_things_2"] == ""
+    assert normalized["favorite_things_3"] == ""
+    assert normalized["reinforcers_1"] == ""
+    assert normalized["reinforcers_2"] == ""
+    assert normalized["reinforcers_3"] == ""
+
+
+def test_normalize_combines_overflow_reinforcers_across_slots() -> None:
+    normalized = normalize_form_data(
+        {
+            "favorite_reinforcers": ["praise", "stickers", "breaks", "snacks", "tokens"],
+        }
+    )
+    # 5 items → 3 slots distributed: 2, 2, 1
+    assert normalized["reinforcers_1"] == "praise, stickers"
+    assert normalized["reinforcers_2"] == "breaks, snacks"
+    assert normalized["reinforcers_3"] == "tokens"
+
+
+def test_participant_first_name_from_for_header() -> None:
+    text = (
+        "submission ID# 123456 For: Rivera, Alex | DOB: 3/4/2015 | "
+        "Parent: Sam Rivera"
+    )
+    assert participant_first_name_from_text(text) == "Alex"
+    assert participant_first_name_from_text("For: Smith, Jordan Lee | DOB: 1/1/2010") == "Jordan"
+    assert participant_first_name_from_text("no header here") == ""
+
+
+def test_sanitize_single_parent_contact_keeps_one_matched_set() -> None:
+    name, phone, email = _sanitize_single_parent_contact(
+        "Jane Smith and John Doe",
+        "555-0100 / 555-0200",
+        "jane@example.com; john@example.com",
+    )
+    assert name == "Jane Smith"
+    assert phone == "555-0100"
+    assert email == "jane@example.com"
+
+    name, phone, email = _sanitize_single_parent_contact(
+        "Mother: Taylor Lee / Father: Sam Rivera",
+        "(555) 111-2222 or 555-333-4444",
+        "taylor.lee@example.com",
+    )
+    assert name == "Taylor Lee"
+    assert phone == "(555) 111-2222"
+    assert email == "taylor.lee@example.com"
+
+    # Last, First stays one person.
+    name, phone, email = _sanitize_single_parent_contact(
+        "Rivera, Sam", "555-0199", "sam@example.com"
+    )
+    assert name == "Rivera, Sam"
+    assert phone == "555-0199"
+    assert email == "sam@example.com"
+
+
+def test_normalize_keeps_only_one_parent_guardian() -> None:
+    normalized = normalize_form_data(
+        {
+            "parent_name": "Parent/Guardian 1: Ana Gomez & Parent 2: Luis Gomez",
+            "parent_phone": "555-1000; 555-2000",
+            "parent_email": "ana@example.com / luis@example.com",
+        }
+    )
+    assert normalized["parent_name"] == "Ana Gomez"
+    assert normalized["parent_phone"] == "555-1000"
+    assert normalized["parent_email"] == "ana@example.com"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("Is epi pen provided: none", "no epi pen"),
+        ("epi pen provided: no", "no epi pen"),
+        ("Does participant have seizures: no", "no seizures"),
+        ("Allergies: none", "no allergies"),
+        ("Food allergies: none", "no food allergies"),
+        ("Participant food allergies/dietary restrictions: none", "no food allergies"),
+        ("Latex allergy; food allergies: none", "Latex allergy; no food allergies"),
+        ("Allergic to peanuts, no allergies", "Allergic to peanuts"),
+        ("Peanuts; no epi pen", "Peanuts; no epi pen"),
+        ("", ""),
+    ],
+)
+def test_naturalize_medical_summary(raw: str, expected: str) -> None:
+    assert _naturalize_medical_summary(raw) == expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (
+            "Participant's areas that can be challenging: becomes upset in loud rooms. "
+            "Strategies that help with challenges: offer headphones and a quiet break.",
+            "becomes upset in loud rooms. offer headphones and a quiet break.",
+        ),
+        (
+            "Participant's behavioral challenges: elopes from group. "
+            "Behavioral strategies: stay within arm's reach.",
+            "elopes from group. stay within arm's reach.",
+        ),
+        ("Offer choices when frustrated.", "Offer choices when frustrated."),
+        ("None at the moment", ""),
+        ("none", ""),
+        ("N/A", ""),
+        ("Participant's behavioral challenges: None at the moment", ""),
+    ],
+)
+def test_naturalize_behavioral_summary(raw: str, expected: str) -> None:
+    from pdf_filler import _naturalize_behavioral_summary
+
+    assert _naturalize_behavioral_summary(raw) == expected
+
+
+def test_apply_none_source_guards_blanks_hallucinated_behavioral() -> None:
+    from pdf_filler import apply_none_source_guards, normalize_form_data
+
+    hallucinated = normalize_form_data(
+        {
+            "name": "Alex",
+            "behavioral_management": (
+                "Gets upset in loud rooms; offer headphones and a quiet break."
+            ),
+            "favorite_things": ["music"],
+        }
+    )
+    source = (
+        "submission ID# 1 For: Rivera, Alex | DOB: 1/1/2015\n"
+        "Participant's behavioral challenges: None at the moment\n"
+        "Participant's strengths and favorite interests: music\n"
+    )
+    guarded = apply_none_source_guards(hallucinated, source)
+    assert guarded["behavioral_management"] == ""
+    assert guarded["favorite_things_1"] == "music"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("none", True),
+        ("None at the moment", True),
+        ("nothing at this time", True),
+        ("n/a", True),
+        ("no concerns", True),
+        ("offer choices", False),
+        ("no epi pen", False),
+        ("no food allergies", False),
+    ],
+)
+def test_is_none_like_answer(raw: str, expected: bool) -> None:
+    from pdf_filler import _is_none_like_answer
+
+    assert _is_none_like_answer(raw) is expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("verbal praise", "verbal praise"),
+        ("stickers", "stickers"),
+        ("none", ""),
+        ("None", ""),
+        ("n/a", ""),
+        ("independent", ""),
+        ("Independently", ""),
+        ("independent walker", ""),
+        ("help in the restroom", ""),
+        ("autism", ""),
+        ("ASD", ""),
+        ("ID", ""),
+        ("intellectual disability", ""),
+        ("ADHD", ""),
+        ("", ""),
+    ],
+)
+def test_sanitize_reinforcer(raw: str, expected: str) -> None:
+    assert _sanitize_reinforcer(raw) == expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("soccer", "soccer"),
+        ("painting and reading", "painting and reading"),
+        ("none", ""),
+        ("n/a", ""),
+        ("autism", ""),
+        ("autism and ID", ""),
+        ("ID", ""),
+        ("intellectual disability", ""),
+        ("Down syndrome", ""),
+        ("independent", ""),
+        ("", ""),
+    ],
+)
+def test_sanitize_favorite_thing(raw: str, expected: str) -> None:
+    assert _sanitize_favorite_thing(raw) == expected
+
+
+def test_normalize_form_data_flat_keys_and_reinforcers_alias() -> None:
+    normalized = normalize_form_data(
+        {
+            "name": "Blake",
+            "favorite_things_2": "drums",
+            "reinforcers": ["token", "break", "snack", "park"],
+            "allergies": "Dairy",
+            "bathroom_needs": "Needs help with buttons",
+        }
+    )
+    # Sparse slots are packed forward so empty bullets are not left in between.
+    assert normalized["favorite_things_1"] == "drums"
+    assert normalized["favorite_things_2"] == ""
+    assert normalized["reinforcers_1"] == "token, break"
+    assert normalized["reinforcers_2"] == "snack"
+    assert normalized["reinforcers_3"] == "park"
+    assert normalized["allergies"] == "Dairy"
+    assert "buttons" in normalized["bathroom_needs"]
+
+
+def test_normalize_form_data_non_dict_returns_empty() -> None:
+    assert normalize_form_data("not a dict") == empty_form_data()  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("", "N/A"),
+        ("   ", "N/A"),
+        ("n/a", "N/A"),
+        ("None", "N/A"),
+        ("no.", "N/A"),
+        ("not applicable", "N/A"),
+        ("Peanut butter", "Peanut butter"),
+    ],
+)
+def test_na_if_blank_or_none(raw: str, expected: str) -> None:
+    assert _na_if_blank_or_none(raw) == expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("", ""),
+        ("independent walker", "N/A"),
+        ("Independent Walker", "N/A"),
+        ("no help needed", "N/A"),
+        ("does not need help", "N/A"),
+        ("independently in the restroom", "N/A"),
+        ("Needs help with zippers", "Needs help with zippers"),
+        ("Uses an independent walker at school", "Uses an independent at school"),
+    ],
+)
+def test_sanitize_bathroom_needs(raw: str, expected: str) -> None:
+    assert _sanitize_bathroom_needs(raw) == expected
+
+
+def test_map_box_and_map_x_scale_from_preview() -> None:
+    mapped = _map_box((100, 200, 300, 400), (2380, 3082))
+    assert mapped[0] == int(100 * 2380 / 1190)
+    assert mapped[1] == int(200 * 3082 / 1541)
+    assert _map_x(119, (2380, 3082)) == int(119 * 2380 / 1190)
+
+
+def test_wrap_text_splits_long_lines() -> None:
+    image = Image.new("RGB", (400, 100), (255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    font = pdf_filler._load_font(24)
+    lines = _wrap_text(draw, "one two three four five six seven", font, max_width=80)
+    assert len(lines) > 1
+    assert " ".join(lines).startswith("one")
+
+
+def test_wrap_text_empty_returns_blank_line() -> None:
+    image = Image.new("RGB", (100, 40), (255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    font = pdf_filler._load_font(20)
+    assert _wrap_text(draw, "   ", font, max_width=50) == [""]
+
+
+def test_fill_form_pdf_returns_two_page_pdf(sample_form_data: dict[str, str]) -> None:
+    pdf_bytes = fill_form_pdf(sample_form_data)
+    assert pdf_bytes.startswith(b"%PDF")
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    assert len(reader.pages) == 2
+    assert float(reader.pages[0].mediabox.width) == 612.0
+
+
+def test_fill_form_pdf_handles_long_multiline_and_empty_rows() -> None:
+    long_body = (
+        "Avoid bright lights and loud rooms when possible. "
+        "Offer a quiet corner with preferred fidgets and a visual timer. "
+        "Staff should narrate transitions early and keep instructions short."
+    )
+    pdf_bytes = fill_form_pdf(
+        {
+            "name": "A Very Long Participant Name That Needs Shrinking",
+            "favorite_things_1": "extraordinarily-long-single-token-interest-name",
+            "allergies": long_body,
+            "bathroom_needs": long_body,
+            "behavioral_management": long_body,
+            "parent_email": "very.long.email.address.for.shrinking@example.com",
+        }
+    )
+    assert len(PdfReader(io.BytesIO(pdf_bytes)).pages) == 2
+
+
+def test_merge_profiles_pdf_concatenates_pages(sample_form_data: dict[str, str]) -> None:
+    first = fill_form_pdf(sample_form_data)
+    second = fill_form_pdf({**sample_form_data, "name": "Second Child"})
+    merged = merge_profiles_pdf(
+        [
+            {"stem": "first", "markdown": "# a", "pdf_bytes": first},
+            {"stem": "second", "markdown": "# b", "pdf_bytes": second},
+        ]
+    )
+    assert len(PdfReader(io.BytesIO(merged)).pages) == 4
+
+
+def test_load_font_falls_back_when_candidates_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pdf_filler, "_FONT_CANDIDATES", ("/nonexistent/font.ttf",))
+    with pytest.warns(UserWarning, match="No preferred form font"):
+        font = pdf_filler._load_font(32)
+    assert font is not None

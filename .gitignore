@@ -2,8 +2,8 @@
 __pycache__/
 *.pyc
 
-# Streamlit local config/secrets (if you use them)
-.streamlit/
+# Streamlit secrets only — committed config.toml binds to localhost by default
+.streamlit/secrets.toml
 
 # Environments
 .env
@@ -13,3 +13,9 @@ env/
 
 # Local PDF calibration previews
 _pdf_preview/
+
+# Test / coverage artifacts
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/

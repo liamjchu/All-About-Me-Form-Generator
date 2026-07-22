@@ -1,0 +1,10 @@
+[server]
+# Default: this machine only. For intentional LAN share, override at launch:
+#   streamlit run app.py --server.address 0.0.0.0
+address = "127.0.0.1"
+port = 8501
+# Matches the 10 MB per-file check in file_inputs.py (Streamlit unit is MB).
+maxUploadSize = 10
+
+[browser]
+gatherUsageStats = false
