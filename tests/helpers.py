@@ -1,4 +1,4 @@
-"""Builders and local servers for real PDF/image/HTTP fixtures."""
+"""Builders and local servers for real PDF/HTTP fixtures."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from PIL import Image
 from pypdf import PdfWriter
 from reportlab.pdfgen import canvas
 
@@ -30,20 +29,6 @@ def make_empty_pdf() -> bytes:
     writer = PdfWriter()
     writer.add_blank_page(width=612, height=792)
     writer.write(buffer)
-    return buffer.getvalue()
-
-
-def make_png_bytes(color: tuple[int, int, int] = (40, 120, 200), size=(64, 64)) -> bytes:
-    image = Image.new("RGB", size, color)
-    buffer = io.BytesIO()
-    image.save(buffer, format="PNG")
-    return buffer.getvalue()
-
-
-def make_jpeg_bytes(color: tuple[int, int, int] = (200, 80, 40), size=(48, 48)) -> bytes:
-    image = Image.new("RGB", size, color)
-    buffer = io.BytesIO()
-    image.save(buffer, format="JPEG")
     return buffer.getvalue()
 
 

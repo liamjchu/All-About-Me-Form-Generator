@@ -21,10 +21,8 @@ from ai_backend import (
     _env_or_dotenv,
     _parse_form_json,
     _text_model,
-    _vision_model,
 )
-from file_inputs import FooterMark
-from tests.helpers import FakeOllamaHandler, make_png_bytes
+from tests.helpers import FakeOllamaHandler
 
 
 def test_env_or_dotenv_reads_process_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -35,14 +33,14 @@ def test_env_or_dotenv_reads_process_env(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_env_or_dotenv_reads_dotenv_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.delenv("OLLAMA_VISION_MODEL", raising=False)
+    monkeypatch.delenv("OLLAMA_MODEL", raising=False)
     env_file = tmp_path / ".env"
     env_file.write_text(
-        "# comment\n\nOLLAMA_VISION_MODEL='vision-from-file'\nOTHER=1\n",
+        "# comment\n\nOLLAMA_MODEL='model-from-file'\nOTHER=1\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(ai_backend, "PROJECT_ROOT", tmp_path)
-    assert _env_or_dotenv("OLLAMA_VISION_MODEL") == "vision-from-file"
+    assert _env_or_dotenv("OLLAMA_MODEL") == "model-from-file"
 
 
 def test_env_or_dotenv_returns_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -61,10 +59,8 @@ def test_base_url_strips_openai_v1_suffix(
 
 def test_model_helpers_use_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv("OLLAMA_MODEL", raising=False)
-    monkeypatch.delenv("OLLAMA_VISION_MODEL", raising=False)
     monkeypatch.setattr(ai_backend, "PROJECT_ROOT", tmp_path)
     assert _text_model() == ai_backend.DEFAULT_MODEL
-    assert _vision_model() == ai_backend.DEFAULT_VISION_MODEL
 
 
 def test_system_prompt_forbids_hallucination_and_avoids_leaky_examples() -> None:
@@ -153,11 +149,6 @@ def test_extract_form_data_requires_input() -> None:
         extract_form_data()
 
 
-def test_extract_form_data_rejects_bad_image_mime() -> None:
-    with pytest.raises(ValueError, match="image MIME"):
-        extract_form_data(image_bytes=b"abc", image_mime_type="application/pdf")
-
-
 def test_extract_form_data_text_via_local_server(
     monkeypatch: pytest.MonkeyPatch, ollama_server: str
 ) -> None:
@@ -220,120 +211,6 @@ def test_extract_form_data_blanks_behavioral_when_source_says_none(
     assert data["name"] == "Alex"
     assert data["behavioral_management"] == ""
     assert data["favorite_things_1"] == "swimming"
-
-
-def test_extract_form_data_image_uses_vision_model(
-    monkeypatch: pytest.MonkeyPatch, ollama_server: str
-) -> None:
-    monkeypatch.setenv("OLLAMA_BASE_URL", ollama_server)
-    monkeypatch.setenv("OLLAMA_VISION_MODEL", "test-vision")
-    data = extract_form_data(image_bytes=make_png_bytes(), image_mime_type="image/png")
-    assert data["name"] == "Alex"
-    assert FakeOllamaHandler.last_payload is not None
-    assert FakeOllamaHandler.last_payload["model"] == "test-vision"
-    assert FakeOllamaHandler.last_payload["keep_alive"] == "30m"
-    assert FakeOllamaHandler.last_payload["options"]["num_ctx"] == ai_backend.DEFAULT_NUM_CTX
-    assert "images" in FakeOllamaHandler.last_payload["messages"][1]
-    user_content = FakeOllamaHandler.last_payload["messages"][1]["content"]
-    assert "photo" in user_content.lower()
-    assert "handwritten" in user_content.lower()
-
-
-def test_extract_footer_mark_uses_ocr_without_ollama(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from ai_backend import extract_footer_mark
-
-    called = {"chat": False}
-
-    def _fail_chat(*_args, **_kwargs):  # noqa: ANN001
-        called["chat"] = True
-        raise AssertionError("vision fallback should not run when OCR succeeds")
-
-    monkeypatch.setattr(ai_backend, "_chat", _fail_chat)
-    monkeypatch.setattr(
-        ai_backend,
-        "extract_footer_mark_ocr",
-        lambda _bytes: FooterMark(
-            date_line="Jun 30 2026 1:21PM ET",
-            page=45,
-            total=85,
-        ),
-    )
-    mark = extract_footer_mark(make_png_bytes(), image_mime_type="image/png")
-    assert mark.page == 45
-    assert mark.total == 85
-    assert called["chat"] is False
-
-
-def test_default_vision_model_is_qwen() -> None:
-    assert ai_backend.DEFAULT_VISION_MODEL == "qwen2.5vl:7b"
-
-
-def test_extract_form_data_multiple_images(
-    monkeypatch: pytest.MonkeyPatch, ollama_server: str
-) -> None:
-    monkeypatch.setenv("OLLAMA_BASE_URL", ollama_server)
-    monkeypatch.setenv("OLLAMA_VISION_MODEL", "test-vision")
-    data = extract_form_data(
-        images=[
-            (make_png_bytes(color=(10, 20, 30)), "image/png"),
-            (make_png_bytes(color=(40, 50, 60)), "image/png"),
-        ]
-    )
-    assert data["name"] == "Alex"
-    assert FakeOllamaHandler.last_payload is not None
-    images = FakeOllamaHandler.last_payload["messages"][1]["images"]
-    assert len(images) == 2
-
-
-def test_extract_footer_mark_skips_vision_by_default(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from ai_backend import extract_footer_mark
-
-    called = {"chat": False}
-
-    def _fail_chat(*_args, **_kwargs):  # noqa: ANN001
-        called["chat"] = True
-        raise AssertionError("vision fallback must stay off by default")
-
-    monkeypatch.delenv("FOOTER_VISION_FALLBACK", raising=False)
-    monkeypatch.setattr(ai_backend, "_chat", _fail_chat)
-    monkeypatch.setattr(
-        ai_backend,
-        "extract_footer_mark_ocr",
-        lambda _bytes: FooterMark(),
-    )
-    mark = extract_footer_mark(make_png_bytes(), image_mime_type="image/png")
-    assert mark == FooterMark()
-    assert called["chat"] is False
-
-
-def test_extract_footer_mark_reads_page_and_date(
-    monkeypatch: pytest.MonkeyPatch, ollama_server: str
-) -> None:
-    from ai_backend import extract_footer_mark
-
-    FakeOllamaHandler.response_content = json.dumps(
-        {
-            "date_line": "Jun 30 2026 1:21PM ET",
-            "page": 45,
-            "total": 85,
-        }
-    )
-    monkeypatch.setenv("OLLAMA_BASE_URL", ollama_server)
-    monkeypatch.setenv("OLLAMA_VISION_MODEL", "test-vision")
-    monkeypatch.setenv("FOOTER_VISION_FALLBACK", "1")
-    monkeypatch.setattr(
-        ai_backend,
-        "extract_footer_mark_ocr",
-        lambda _bytes: FooterMark(),
-    )
-    mark = extract_footer_mark(make_png_bytes(), image_mime_type="image/png")
-    assert mark.date_line == "Jun 30 2026 1:21PM ET"
-    assert mark.page == 45
-    assert mark.total == 85
 
 
 def test_extract_form_data_rejects_empty_model_content(

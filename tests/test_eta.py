@@ -5,13 +5,11 @@ from __future__ import annotations
 import time
 
 from eta import (
-    GEN_TEXT_SECONDS,
-    GEN_VISION_SECONDS,
-    PREP_IMAGE_SECONDS,
+    GEN_SECONDS,
+    PREP_SECONDS,
     EtaTracker,
     estimate_batch_seconds,
     format_remaining,
-    is_image_upload,
     run_with_heartbeat,
 )
 
@@ -26,28 +24,10 @@ def test_format_remaining_seconds_and_minutes() -> None:
     assert format_remaining(3660) == "About 1 hr 1 min remaining"
 
 
-def test_is_image_upload_by_mime_or_extension() -> None:
-    assert is_image_upload("page.jpg", "image/jpeg")
-    assert is_image_upload("scan.PNG", None)
-    assert not is_image_upload("notes.txt", "text/plain")
-
-
-def test_estimate_batch_seconds_weights_photos_heavier() -> None:
-    from eta import PREP_TEXT_SECONDS
-
-    text_only = estimate_batch_seconds(
-        file_names=["a.txt"],
-        mime_types=["text/plain"],
-        pages_per_form=2,
-    )
-    photos = estimate_batch_seconds(
-        file_names=["a.jpg", "b.jpg"],
-        mime_types=["image/jpeg", "image/jpeg"],
-        pages_per_form=2,
-    )
-    assert photos > text_only
-    assert photos == 2 * PREP_IMAGE_SECONDS + GEN_VISION_SECONDS
-    assert text_only == PREP_TEXT_SECONDS + GEN_TEXT_SECONDS
+def test_estimate_batch_seconds_scales_with_file_count() -> None:
+    assert estimate_batch_seconds(file_count=0) == 0
+    assert estimate_batch_seconds(file_count=1) == PREP_SECONDS + GEN_SECONDS
+    assert estimate_batch_seconds(file_count=3) == 3 * (PREP_SECONDS + GEN_SECONDS)
 
 
 def test_eta_tracker_scales_with_observed_rate() -> None:
@@ -70,7 +50,7 @@ def test_eta_tracker_provisional_keeps_remaining_from_climbing() -> None:
     without_provisional = tracker.remaining_seconds()
     assert without_provisional > early
 
-    tracker.set_provisional(20.0)  # ~20s into a 45s vision call
+    tracker.set_provisional(20.0)  # ~20s into an 8s+ gen call that ran long
     with_provisional = tracker.remaining_seconds()
     assert with_provisional < without_provisional
     assert with_provisional < early

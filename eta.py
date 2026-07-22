@@ -6,21 +6,13 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Sequence, TypeVar
+from typing import TypeVar
 
 # Planned seconds per work unit (local Ollama on a typical laptop).
-PREP_IMAGE_SECONDS: float = 1.5
-PREP_TEXT_SECONDS: float = 0.4
-GEN_VISION_SECONDS: float = 45.0
-GEN_TEXT_SECONDS: float = 8.0
+PREP_SECONDS: float = 0.4
+GEN_SECONDS: float = 8.0
 
 T = TypeVar("T")
-
-
-def is_image_upload(file_name: str, mime_type: str | None) -> bool:
-    name = file_name.lower()
-    mime = (mime_type or "").lower()
-    return mime.startswith("image/") or name.endswith((".png", ".jpg", ".jpeg"))
 
 
 def run_with_heartbeat(
@@ -84,29 +76,10 @@ def format_remaining(seconds: float | None) -> str:
     return f"About {hours} hr {minutes} min remaining"
 
 
-def estimate_prep_seconds(*, image_count: int, text_count: int) -> float:
-    return image_count * PREP_IMAGE_SECONDS + text_count * PREP_TEXT_SECONDS
-
-
-def estimate_gen_seconds(*, vision_groups: int, text_groups: int) -> float:
-    return vision_groups * GEN_VISION_SECONDS + text_groups * GEN_TEXT_SECONDS
-
-
-def estimate_batch_seconds(
-    *,
-    file_names: Sequence[str],
-    mime_types: Sequence[str | None],
-    pages_per_form: int,
-) -> float:
+def estimate_batch_seconds(*, file_count: int) -> float:
     """Initial estimate before any work finishes."""
-    images = sum(
-        1 for name, mime in zip(file_names, mime_types) if is_image_upload(name, mime)
-    )
-    texts = len(file_names) - images
-    prep = estimate_prep_seconds(image_count=images, text_count=texts)
-    pages = max(1, pages_per_form)
-    vision_groups = (images + pages - 1) // pages if images else 0
-    return prep + estimate_gen_seconds(vision_groups=vision_groups, text_groups=texts)
+    count = max(0, file_count)
+    return count * (PREP_SECONDS + GEN_SECONDS)
 
 
 @dataclass
