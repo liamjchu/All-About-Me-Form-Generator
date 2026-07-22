@@ -22,6 +22,7 @@ from pdf_filler import (
     _sanitize_bathroom_needs,
     _sanitize_favorite_thing,
     _sanitize_reinforcer,
+    _sanitize_single_parent_contact,
     _template_pdf,
     _wrap_text,
 )
@@ -134,6 +135,47 @@ def test_participant_first_name_from_for_header() -> None:
     assert participant_first_name_from_text(text) == "Alex"
     assert participant_first_name_from_text("For: Smith, Jordan Lee | DOB: 1/1/2010") == "Jordan"
     assert participant_first_name_from_text("no header here") == ""
+
+
+def test_sanitize_single_parent_contact_keeps_one_matched_set() -> None:
+    name, phone, email = _sanitize_single_parent_contact(
+        "Jane Smith and John Doe",
+        "555-0100 / 555-0200",
+        "jane@example.com; john@example.com",
+    )
+    assert name == "Jane Smith"
+    assert phone == "555-0100"
+    assert email == "jane@example.com"
+
+    name, phone, email = _sanitize_single_parent_contact(
+        "Mother: Taylor Lee / Father: Sam Rivera",
+        "(555) 111-2222 or 555-333-4444",
+        "taylor.lee@example.com",
+    )
+    assert name == "Taylor Lee"
+    assert phone == "(555) 111-2222"
+    assert email == "taylor.lee@example.com"
+
+    # Last, First stays one person.
+    name, phone, email = _sanitize_single_parent_contact(
+        "Rivera, Sam", "555-0199", "sam@example.com"
+    )
+    assert name == "Rivera, Sam"
+    assert phone == "555-0199"
+    assert email == "sam@example.com"
+
+
+def test_normalize_keeps_only_one_parent_guardian() -> None:
+    normalized = normalize_form_data(
+        {
+            "parent_name": "Parent/Guardian 1: Ana Gomez & Parent 2: Luis Gomez",
+            "parent_phone": "555-1000; 555-2000",
+            "parent_email": "ana@example.com / luis@example.com",
+        }
+    )
+    assert normalized["parent_name"] == "Ana Gomez"
+    assert normalized["parent_phone"] == "555-1000"
+    assert normalized["parent_email"] == "ana@example.com"
 
 
 @pytest.mark.parametrize(

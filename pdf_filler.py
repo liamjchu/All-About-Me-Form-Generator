@@ -224,6 +224,16 @@ def normalize_form_data(raw: dict) -> dict[str, str]:
         if isinstance(raw.get(key), str):
             data[key] = raw[key].strip()
 
+    # Parent/guardian section holds one contact only — never mixed pairs.
+    parent_name, parent_phone, parent_email = _sanitize_single_parent_contact(
+        data["parent_name"],
+        data["parent_phone"],
+        data["parent_email"],
+    )
+    data["parent_name"] = parent_name
+    data["parent_phone"] = parent_phone
+    data["parent_email"] = parent_email
+
     # Mobility phrases (e.g. "independent walker") must not land in toileting.
     data["bathroom_needs"] = _sanitize_bathroom_needs(data["bathroom_needs"])
     data["allergies"] = _naturalize_allergy_summary(data["allergies"])
@@ -267,6 +277,101 @@ def _distribute_items(items: list[str], count: int) -> list[str]:
         result.append(", ".join(chunk))
         index += size
     return result
+
+
+_MULTI_PARENT_SPLIT_RE: Final = re.compile(
+    r"\s+(?:and|&)\s+|\s*/\s*|\s*\|\s*|\s*;\s*",
+    flags=re.IGNORECASE,
+)
+_MULTI_CONTACT_SPLIT_RE: Final = re.compile(
+    r"\s+(?:and|&|or)\s+|\s*/\s*|\s*\|\s*|\s*;\s*",
+    flags=re.IGNORECASE,
+)
+_PHONE_TOKEN_RE: Final = re.compile(
+    r"(?:\+?1[\s\-.]*)?(?:\(?\d{3}\)?[\s\-.]*)?\d{3}[\s\-.]*\d{4}",
+)
+_EMAIL_TOKEN_RE: Final = re.compile(
+    r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}",
+    flags=re.IGNORECASE,
+)
+
+
+def _first_parent_name(value: str) -> str:
+    """Keep a single guardian name when several are joined in one field."""
+    cleaned = (value or "").strip(" \t\r\n,;.-")
+    if not cleaned:
+        return ""
+    # Strip role labels like "Mother:" / "Parent/Guardian 1 -" before splitting.
+    cleaned = re.sub(
+        r"^(?:parent(?:/guardian)?|guardian|mother|father|mom|dad|"
+        r"primary\s+contact)\s*(?:#?\s*\d+)?\s*[:\-–—]\s*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    ).strip()
+    # "Last, First" is one person — only split when both sides look like full names.
+    if "," in cleaned and not re.search(r"\band\b|&|/|\|", cleaned, flags=re.IGNORECASE):
+        left, right = (part.strip() for part in cleaned.split(",", 1))
+        # Two full names: "Jane Smith, John Doe". One person: "Smith, Jane".
+        if left and right and len(left.split()) >= 2 and len(right.split()) >= 2:
+            return left
+        return cleaned
+    parts = [
+        part.strip(" \t\r\n,;.-")
+        for part in _MULTI_PARENT_SPLIT_RE.split(cleaned)
+        if part.strip(" \t\r\n,;.-")
+    ]
+    if not parts:
+        return ""
+    first = parts[0]
+    # Drop a leftover role label on the chosen piece.
+    first = re.sub(
+        r"^(?:parent(?:/guardian)?|guardian|mother|father|mom|dad|"
+        r"primary\s+contact)\s*(?:#?\s*\d+)?\s*[:\-–—]\s*",
+        "",
+        first,
+        flags=re.IGNORECASE,
+    ).strip()
+    return first
+
+
+def _first_phone(value: str) -> str:
+    """Keep a single phone number when several are listed."""
+    cleaned = (value or "").strip()
+    if not cleaned:
+        return ""
+    phones = _PHONE_TOKEN_RE.findall(cleaned)
+    if phones:
+        return re.sub(r"\s+", " ", phones[0]).strip(" \t\r\n,;.-")
+    parts = [
+        part.strip(" \t\r\n,;.-")
+        for part in _MULTI_CONTACT_SPLIT_RE.split(cleaned)
+        if part.strip(" \t\r\n,;.-")
+    ]
+    return parts[0] if parts else cleaned
+
+
+def _first_email(value: str) -> str:
+    """Keep a single email when several are listed."""
+    cleaned = (value or "").strip()
+    if not cleaned:
+        return ""
+    emails = _EMAIL_TOKEN_RE.findall(cleaned)
+    if emails:
+        return emails[0].strip(" \t\r\n,;.-")
+    parts = [
+        part.strip(" \t\r\n,;.-")
+        for part in _MULTI_CONTACT_SPLIT_RE.split(cleaned)
+        if part.strip(" \t\r\n,;.-")
+    ]
+    return parts[0] if parts else cleaned
+
+
+def _sanitize_single_parent_contact(
+    name: str, phone: str, email: str
+) -> tuple[str, str, str]:
+    """Collapse multi-guardian contact blobs into one matched name/phone/email."""
+    return _first_parent_name(name), _first_phone(phone), _first_email(email)
 
 
 def _is_none_like_answer(text: str) -> bool:

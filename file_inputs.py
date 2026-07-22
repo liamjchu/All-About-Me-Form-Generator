@@ -5,8 +5,12 @@ from __future__ import annotations
 import io
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Final
 
 from pypdf import PdfReader
+
+# Keep in sync with .streamlit/config.toml server.maxUploadSize (MB).
+MAX_UPLOAD_BYTES: Final = 10 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -54,6 +58,10 @@ def prepare_upload(
     """Extract text from an uploaded PDF for generation."""
     if not is_pdf_upload(file_name=file_name, mime_type=mime_type):
         raise ValueError("Only PDF uploads are supported.")
+    if len(file_bytes) > MAX_UPLOAD_BYTES:
+        raise ValueError(
+            f"PDF exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB size limit."
+        )
     return PreparedInput(raw_text=extract_text_from_pdf(file_bytes))
 
 

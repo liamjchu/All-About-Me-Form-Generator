@@ -52,6 +52,23 @@ def test_app_shows_generated_profiles_from_session_state() -> None:
     assert any(expander.label == "riley" for expander in at.expander)
 
 
+def test_app_wipe_profiles_clears_session() -> None:
+    pdf_bytes = fill_form_pdf({"name": "Riley", "allergies": "N/A"})
+    at = AppTest.from_file(str(APP_PATH), default_timeout=10)
+    at.session_state["generated_profiles"] = [
+        {
+            "stem": "riley",
+            "markdown": "# All About Me\n\n**Name:** Riley\n",
+            "pdf_bytes": pdf_bytes,
+        }
+    ]
+    at.run()
+    wipe = next(button for button in at.button if "Wipe profiles" in button.label)
+    wipe.click().run()
+    assert not at.exception
+    assert at.session_state["generated_profiles"] == []
+
+
 def test_merge_profiles_used_by_app_is_valid_pdf() -> None:
     """Guard the download path the app uses after generation."""
     one = fill_form_pdf({"name": "One"})

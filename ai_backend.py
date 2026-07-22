@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Final
@@ -16,6 +18,7 @@ from pdf_filler import (
     normalize_form_data,
     participant_first_name_from_text,
 )
+from source_minimize import minimize_source_text_for_llm
 
 PROJECT_ROOT: Final = Path(__file__).resolve().parent
 
@@ -78,7 +81,13 @@ SOURCE → TEMPLATE mapping (use ONLY these input-form labels; ignore other sect
   mobility, independence, diagnoses, disabilities). Never pad with "none",
   "n/a", "no", or "independent".
 - parent_name / parent_phone / parent_email: parent/guardian contact fields only.
-  Single-line values. Empty string if that contact line is blank.
+  Use EXACTLY ONE parent/guardian — never two names, never "A and B", "A & B",
+  "A / B", or comma-joined pairs. Prefer Parent/Guardian 1, Primary Contact, or
+  the first fully listed guardian when several appear.
+  parent_phone and parent_email MUST belong to that SAME chosen person only —
+  do not mix one guardian's name with another guardian's phone or email.
+  One phone number and one email address max. Empty string if that contact
+  line is blank.
 - allergies: ONLY combine these source areas into one concise natural summary:
   1) "Medications, if taken during camp hours"
   2) "Does participant have seizures?"
@@ -142,6 +151,34 @@ def _env_or_dotenv(name: str, default: str | None = None) -> str | None:
     return default
 
 
+def _is_loopback_host(host: str) -> bool:
+    """True when host is localhost / loopback (IPv4 or IPv6)."""
+    normalized = (host or "").strip().lower().strip("[]")
+    if normalized in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def _require_loopback_base_url(url: str) -> str:
+    """Reject non-local Ollama endpoints so intake text cannot leave this machine."""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise RuntimeError(
+            f"OLLAMA_BASE_URL must be http(s); got scheme {parsed.scheme!r}."
+        )
+    host = parsed.hostname or ""
+    if not _is_loopback_host(host):
+        raise RuntimeError(
+            "OLLAMA_BASE_URL must point at a loopback address "
+            f"(127.0.0.1 / localhost / ::1), not {host!r}. "
+            "This keeps participant text on this machine."
+        )
+    return url
+
+
 def _base_url() -> str:
     # Accept either the native root or a leftover OpenAI-compatible /v1 URL.
     url = (_env_or_dotenv("OLLAMA_BASE_URL", DEFAULT_BASE_URL) or DEFAULT_BASE_URL).rstrip(
@@ -149,7 +186,7 @@ def _base_url() -> str:
     )
     if url.endswith("/v1"):
         url = url[:-3]
-    return url
+    return _require_loopback_base_url(url)
 
 
 def _text_model() -> str:
@@ -282,12 +319,15 @@ def extract_form_data(raw_text: str | None = None) -> dict[str, str]:
     if not text:
         raise ValueError("Provide raw_text extracted from a PDF.")
 
+    # Full text stays local for name override / none-guards; Ollama only sees
+    # mapped sections with participant last name / DOB / submission IDs redacted.
+    llm_text = minimize_source_text_for_llm(text)
     prompt_text = (
         "Map the labeled input-form answers into the All About Me JSON "
         "using only the SOURCE → TEMPLATE rules from the system prompt. "
         "Copy only facts present in the designated source slots. "
         "Do not invent or guess. Return JSON only.\n\n"
-        f"TEXT SOURCE:\n{text}"
+        f"TEXT SOURCE:\n{llm_text}"
     )
 
     model_text = _chat(

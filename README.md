@@ -1,7 +1,7 @@
 # All About Me Form Generator
 
 Convert participant information PDFs into filled All About Me PDF profiles using a
-local [Ollama](https://ollama.com) model (no OpenAI cloud key).
+local [Ollama](https://ollama.com) model (no cloud API key).
 
 ## Setup
 
@@ -28,16 +28,44 @@ local [Ollama](https://ollama.com) model (no OpenAI cloud key).
    OLLAMA_MODEL=llama3.2:latest
    ```
    `.env` is ignored by Git. No API key is required.
+   `OLLAMA_BASE_URL` must be a loopback address (`127.0.0.1` / `localhost` /
+   `::1`); remote hosts are rejected so intake text stays on this machine.
 
-4. Start the app (reachable on your LAN when bound to `0.0.0.0`):
+4. Start the app (localhost only by default — see `.streamlit/config.toml`):
    ```bash
-   streamlit run app.py --server.address 0.0.0.0
+   streamlit run app.py
    ```
-   Open **http://localhost:8501** on this computer. Do not use `http://0.0.0.0:8501`
-   in the browser — that address only means “listen on all interfaces.”
-   Other devices on the same Wi‑Fi can use `http://YOUR_LAN_IP:8501`
-   (find it with `ipconfig getifaddr en0`).
+   Open **http://localhost:8501** on this computer.
 
-Only PDF uploads are accepted. Text is extracted from each PDF, then
-`llama3.2:latest` maps it into fields for `formTemplate.pdf`. Scanned
-image-only PDFs (no selectable text) are not supported.
+### Optional: HTTPS via reverse proxy
+
+Keep Streamlit on `127.0.0.1`, then put TLS in front with Caddy:
+
+```bash
+caddy run --config deploy/Caddyfile
+```
+
+Edit `deploy/Caddyfile` to use your hostname. Traffic to Streamlit stays on
+loopback; browsers talk HTTPS to Caddy.
+
+### Optional: LAN access
+
+Only if you intentionally need other devices on the same network:
+
+```bash
+streamlit run app.py --server.address 0.0.0.0
+```
+
+Prefer a VPN or SSH tunnel over opening the port on untrusted Wi‑Fi. Other
+devices can use `http://YOUR_LAN_IP:8501` (find it with
+`ipconfig getifaddr en0` on macOS). Do not open `http://0.0.0.0:8501` in the
+browser — that address only means “listen on all interfaces.”
+
+## Upload limits
+
+Only PDF uploads are accepted, max **10 MB per file**. Text is extracted from
+each PDF; only mapped All About Me source sections (with participant last name /
+DOB / submission IDs redacted) are sent to the local model. Scanned image-only
+PDFs (no selectable text) are not supported. Use **Wipe profiles from this
+session** (or download, which also clears) to drop generated profiles from
+memory.

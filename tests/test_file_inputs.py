@@ -66,5 +66,16 @@ def test_prepare_upload_rejects_non_pdf() -> None:
         )
 
 
+def test_prepare_upload_rejects_oversize_pdf() -> None:
+    from file_inputs import MAX_UPLOAD_BYTES
+
+    with pytest.raises(ValueError, match="10 MB"):
+        prepare_upload(
+            file_name="huge.pdf",
+            file_bytes=b"%PDF" + (b"x" * (MAX_UPLOAD_BYTES + 1)),
+            mime_type="application/pdf",
+        )
+
+
 def test_profile_stem_uses_file_name() -> None:
     assert profile_stem("Bob-Joe.pdf") == "Bob-Joe"

@@ -57,6 +57,15 @@ def test_base_url_strips_openai_v1_suffix(
     assert _base_url() == "http://localhost:11434"
 
 
+def test_base_url_rejects_non_loopback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://example.com:11434")
+    monkeypatch.setattr(ai_backend, "PROJECT_ROOT", tmp_path)
+    with pytest.raises(RuntimeError, match="loopback"):
+        _base_url()
+
+
 def test_model_helpers_use_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv("OLLAMA_MODEL", raising=False)
     monkeypatch.setattr(ai_backend, "PROJECT_ROOT", tmp_path)
@@ -84,6 +93,10 @@ def test_system_prompt_forbids_hallucination_and_avoids_leaky_examples() -> None
     assert "no food allergies" in prompt
     assert "none at the moment" in prompt
     assert "do not invent" in prompt
+    # Parent/guardian must be a single matched contact set.
+    assert "exactly one parent/guardian" in prompt
+    assert "same chosen person" in prompt
+    assert 'never "a and b"' in prompt
 
 
 def test_parse_form_json_plain_object() -> None:
@@ -154,7 +167,11 @@ def test_extract_form_data_text_via_local_server(
 ) -> None:
     monkeypatch.setenv("OLLAMA_BASE_URL", ollama_server)
     monkeypatch.setenv("OLLAMA_MODEL", "test-text")
-    data = extract_form_data("Name: Alex Rivera\nFavorite interests: swimming")
+    data = extract_form_data(
+        "submission ID# 42 For: Rivera, Alex | DOB: 1/2/2015\n"
+        "Diagnosis: autism\n"
+        "Participant's strengths and favorite interests: swimming\n"
+    )
     assert data["name"] == "Alex"
     assert data["favorite_things_1"] == "swimming, music"
     assert data["favorite_things_2"] == "dogs"
@@ -162,7 +179,13 @@ def test_extract_form_data_text_via_local_server(
     assert FakeOllamaHandler.last_payload is not None
     assert FakeOllamaHandler.last_payload["model"] == "test-text"
     assert FakeOllamaHandler.last_payload["format"] == "json"
+    user_content = FakeOllamaHandler.last_payload["messages"][1]["content"]
     assert "images" not in FakeOllamaHandler.last_payload["messages"][1]
+    assert "swimming" in user_content
+    assert "autism" not in user_content.lower()
+    assert "1/2/2015" not in user_content
+    assert "Rivera, Alex" not in user_content
+    assert "42" not in user_content
 
 
 def test_extract_form_data_prefers_for_header_first_name(
