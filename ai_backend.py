@@ -15,7 +15,12 @@ from typing import Final, Sequence
 from PIL import Image
 
 from file_inputs import FooterMark, extract_footer_mark_ocr, normalize_date_line
-from pdf_filler import fill_form_pdf, normalize_form_data
+from pdf_filler import (
+    apply_none_source_guards,
+    fill_form_pdf,
+    normalize_form_data,
+    participant_first_name_from_text,
+)
 
 PROJECT_ROOT: Final = Path(__file__).resolve().parent
 
@@ -34,7 +39,7 @@ SYSTEM_PROMPT: Final = """You extract participant facts for an All About Me PDF 
 Return ONLY valid JSON (no markdown fences, no commentary) with this shape:
 {
   "name": "",
-  "favorite_things": ["", "", ""],
+  "favorite_things": ["", ""],
   "favorite_reinforcers": ["", "", ""],
   "parent_name": "",
   "parent_phone": "",
@@ -46,27 +51,37 @@ Return ONLY valid JSON (no markdown fences, no commentary) with this shape:
 
 CRITICAL — no hallucination:
 - Copy facts ONLY from the designated SOURCE labels below on THIS form.
-- If a source answer is blank, illegible, "none", "n/a", or "no", leave that
-  JSON field empty ("" / ["","",""]) or use "N/A" only where noted.
+- If a source answer is blank, illegible, "none", "none at the moment",
+  "nothing at this time", "n/a", "no", or similar, that field has NO usable
+  content — leave the JSON field empty ("" / ["",""]) or use "N/A" only where
+  noted. Do NOT invent a substitute answer.
 - NEVER invent hobbies, interests, reinforcers, names, contacts, allergies,
-  bathroom needs, strategies, or any other values.
+  bathroom needs, strategies, behavioral tips, or any other values.
 - NEVER use example values from this prompt. NEVER fill gaps with guesses,
   stereotypes, or "typical" answers.
 - Leaving a field blank is always better than making something up.
 
 SOURCE → TEMPLATE mapping (use ONLY these input-form labels; ignore other sections):
-- name: participant name fields only.
+- name: ONLY the participant first name from the top-left header line that looks
+  like: "submission ID# nnnnnn For: Lastname, Firstname | DOB: m/dd/yyyy ...".
+  Use ONLY the Firstname after "For:" (the given name after the comma).
+  Do NOT use last name. Do NOT use parent/guardian names. Do NOT pull a name
+  from any other section of the form (signature, contact, body answers, etc.).
+  If that For: header cannot be read, leave name as "".
 - favorite_things: ONLY the answer written under
   "Participant's strengths and favorite interests".
-  Split into up to 3 short list items. Combine related items onto one line if
-  needed to stay within 3. Unused slots must be "".
-  If that source is blank / "none" / "n/a" / "no" / illegible, return ["", "", ""].
+  Return at most 2 short list items. If there are many interests, summarize or
+  keep the most notable ones, and combine related items onto both lines
+  (e.g. "a, b" and "c, d") so they fit in 2 bullets — do not dump overflow
+  onto only the last bullet. Unused slots must be "".
+  If that source is blank / "none" / "n/a" / "no" / illegible, return ["", ""].
   NEVER copy diagnoses, disabilities, medical labels, or other sections
   (autism, ASD, ID, intellectual disability, ADHD, Down syndrome, etc.).
   Never pad with "none", "n/a", "no", or "independent".
 - favorite_reinforcers: ONLY the answer written under "Favorite reinforcers"
   (rewards / motivators written on the form).
-  Split into up to 3 short list items. Combine onto fewer lines if needed.
+  Split into up to 3 short list items. Combine onto fewer lines if needed,
+  distributing across bullets rather than only the last one.
   Unused slots must be "". If that source is blank / "none" / "n/a" / "no" /
   illegible, return ["", "", ""].
   Never invent items. Never copy words from other sections (bathroom, strengths,
@@ -74,11 +89,17 @@ SOURCE → TEMPLATE mapping (use ONLY these input-form labels; ignore other sect
   "n/a", "no", or "independent".
 - parent_name / parent_phone / parent_email: parent/guardian contact fields only.
   Single-line values. Empty string if that contact line is blank.
-- allergies: ONLY combine these four source areas into one concise summary:
+- allergies: ONLY combine these source areas into one concise natural summary:
   1) "Medications, if taken during camp hours"
   2) "Does participant have seizures?"
   3) "Participant allergies(Please include all):"
   4) "Participant food allergies/dietary restrictions:"
+  5) Any epi-pen / emergency medication question on the form
+  Write flowing short statements (e.g. "no epi pen", "no seizures",
+  "allergic to peanuts", "no food allergies"), NOT question/answer echoes like
+  "Is epi pen provided: none". When one allergy type is none but another has
+  content, say the type explicitly ("no food allergies") — never a bare
+  "no allergies" that contradicts listed allergies. Never invent details.
   If all are blank/none/no, return exactly "N/A".
 - bathroom_needs: ONLY "Does the participant need help in the restroom?".
   If blank/none/no help needed, return exactly "N/A".
@@ -88,9 +109,15 @@ SOURCE → TEMPLATE mapping (use ONLY these input-form labels; ignore other sect
   1) "Participant's areas that can be challenging"
   2) "Strategies that help with challenges"
   3) "Behavioral strategies" / "Behavioral Strategies" / "Behavorial Strategies"
-  Copy the written notes into one concise paragraph (roughly 1–4 sentences).
-  If ANY of these sections has readable content, fill this field from it.
-  Empty string only when all of them are blank / "none" / "n/a" / illegible.
+  Also accept near-matches like "Participant's behavioral challenges".
+  If EVERY present source above is blank / "none" / "none at the moment" /
+  "n/a" / "no" / illegible, return exactly "" — do NOT invent challenges or
+  strategies.
+  When there IS real written content (not none-like), rewrite into a brief
+  natural summary (about 1–3 short sentences). Keep only key challenges and
+  helpful strategies. Do NOT paste section titles, headings, or "label: value"
+  / question/answer scaffolding (never "Participant's behavioral challenges:
+  ..."). Paraphrase into flowing prose — be consistent across forms.
 
 Rules:
 - Use only facts from the mapped source areas above. Never invent or borrow from
@@ -321,7 +348,7 @@ def form_data_to_markdown(form_data: dict[str, str]) -> str:
     """Build a readable All About Me Markdown profile from extracted fields."""
     things = [
         form_data.get(f"favorite_things_{index}", "").strip()
-        for index in range(1, 4)
+        for index in range(1, 3)
         if form_data.get(f"favorite_things_{index}", "").strip()
     ]
     reinforcers = [
@@ -403,9 +430,9 @@ def extract_form_data(
             "Read printed and handwritten answers carefully, then map them "
             "into the All About Me JSON using the SOURCE → TEMPLATE rules. "
             "Copy only text that actually appears in each designated source "
-            "slot. If a slot is blank, n/a, none, or unreadable, leave that "
-            "JSON field empty (or N/A where the rules say). Do not invent or "
-            f"guess any values. Return JSON only."
+            "slot. If a slot is blank, n/a, none, 'none at the moment', or "
+            "unreadable, leave that JSON field empty (or N/A where the rules "
+            "say). Do not invent or guess any values. Return JSON only."
             f"{page_note}"
         )
         if text:
@@ -437,6 +464,13 @@ def extract_form_data(
         num_predict=DEFAULT_NUM_PREDICT,
     )
     form_data = _parse_form_json(model_text)
+    # Prefer the intake "For: Last, First" header when it appears in text sources.
+    header_first = participant_first_name_from_text(text) if text else ""
+    if header_first:
+        form_data["name"] = header_first
+    # If the form text says none / n/a for a section, never keep invented content.
+    if text:
+        form_data = apply_none_source_guards(form_data, text)
     if not form_data.get("name") and not any(
         form_data.get(key)
         for key in form_data

@@ -19,10 +19,10 @@ def ollama_server():
 @pytest.fixture
 def sample_form_data() -> dict[str, str]:
     return {
-        "name": "Jordan Lee",
+        "name": "Jordan",
         "favorite_things_1": "painting",
         "favorite_things_2": "soccer",
-        "favorite_things_3": "cats",
+        "favorite_things_3": "",
         "reinforcers_1": "praise",
         "reinforcers_2": "snack",
         "reinforcers_3": "iPad time",

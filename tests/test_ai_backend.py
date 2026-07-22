@@ -81,6 +81,13 @@ def test_system_prompt_forbids_hallucination_and_avoids_leaky_examples() -> None
     # Behavioral management must accept the common form label variants.
     assert "behavioral strategies" in prompt
     assert "strategies that help with challenges" in prompt
+    # Name must come from the For: header; medical fields must be natural prose.
+    assert 'for: lastname, firstname' in prompt
+    assert "question/answer" in prompt
+    assert "at most 2" in prompt
+    assert "no food allergies" in prompt
+    assert "none at the moment" in prompt
+    assert "do not invent" in prompt
 
 
 def test_parse_form_json_plain_object() -> None:
@@ -126,7 +133,7 @@ def test_parse_form_json_rejects_unusable_text() -> None:
 def test_form_data_to_markdown_includes_sections(sample_form_data: dict[str, str]) -> None:
     markdown = form_data_to_markdown(sample_form_data)
     assert markdown.startswith("# All About Me")
-    assert "**Name:** Jordan Lee" in markdown
+    assert "**Name:** Jordan" in markdown
     assert "- painting" in markdown
     assert "- praise" in markdown
     assert "taylor.lee@example.com" in markdown
@@ -157,12 +164,62 @@ def test_extract_form_data_text_via_local_server(
     monkeypatch.setenv("OLLAMA_BASE_URL", ollama_server)
     monkeypatch.setenv("OLLAMA_MODEL", "test-text")
     data = extract_form_data("Name: Alex Rivera\nFavorite interests: swimming")
-    assert data["name"] == "Alex Rivera"
-    assert data["favorite_things_1"] == "swimming"
+    assert data["name"] == "Alex"
+    assert data["favorite_things_1"] == "swimming, music"
+    assert data["favorite_things_2"] == "dogs"
+    assert data["favorite_things_3"] == ""
     assert FakeOllamaHandler.last_payload is not None
     assert FakeOllamaHandler.last_payload["model"] == "test-text"
     assert FakeOllamaHandler.last_payload["format"] == "json"
     assert "images" not in FakeOllamaHandler.last_payload["messages"][1]
+
+
+def test_extract_form_data_prefers_for_header_first_name(
+    monkeypatch: pytest.MonkeyPatch, ollama_server: str
+) -> None:
+    """Even if the model returns a parent name, the For: header wins."""
+    FakeOllamaHandler.response_content = json.dumps(
+        {
+            "name": "Sam Rivera",
+            "favorite_things": ["", ""],
+            "favorite_reinforcers": ["", "", ""],
+            "allergies": "N/A",
+            "bathroom_needs": "N/A",
+            "behavioral_management": "",
+        }
+    )
+    monkeypatch.setenv("OLLAMA_BASE_URL", ollama_server)
+    data = extract_form_data(
+        "submission ID# 998877 For: Rivera, Alex | DOB: 5/6/2014 | Camp intake"
+    )
+    assert data["name"] == "Alex"
+
+
+def test_extract_form_data_blanks_behavioral_when_source_says_none(
+    monkeypatch: pytest.MonkeyPatch, ollama_server: str
+) -> None:
+    """Hallucinated behavioral text must not survive a none source answer."""
+    FakeOllamaHandler.response_content = json.dumps(
+        {
+            "name": "Alex",
+            "favorite_things": ["swimming", ""],
+            "favorite_reinforcers": ["", "", ""],
+            "allergies": "N/A",
+            "bathroom_needs": "N/A",
+            "behavioral_management": (
+                "Gets upset in loud rooms; offer headphones and breaks."
+            ),
+        }
+    )
+    monkeypatch.setenv("OLLAMA_BASE_URL", ollama_server)
+    data = extract_form_data(
+        "submission ID# 1 For: Rivera, Alex | DOB: 1/1/2015\n"
+        "Participant's strengths and favorite interests: swimming\n"
+        "Participant's behavioral challenges: None at the moment\n"
+    )
+    assert data["name"] == "Alex"
+    assert data["behavioral_management"] == ""
+    assert data["favorite_things_1"] == "swimming"
 
 
 def test_extract_form_data_image_uses_vision_model(
@@ -171,7 +228,7 @@ def test_extract_form_data_image_uses_vision_model(
     monkeypatch.setenv("OLLAMA_BASE_URL", ollama_server)
     monkeypatch.setenv("OLLAMA_VISION_MODEL", "test-vision")
     data = extract_form_data(image_bytes=make_png_bytes(), image_mime_type="image/png")
-    assert data["name"] == "Alex Rivera"
+    assert data["name"] == "Alex"
     assert FakeOllamaHandler.last_payload is not None
     assert FakeOllamaHandler.last_payload["model"] == "test-vision"
     assert FakeOllamaHandler.last_payload["keep_alive"] == "30m"
@@ -224,7 +281,7 @@ def test_extract_form_data_multiple_images(
             (make_png_bytes(color=(40, 50, 60)), "image/png"),
         ]
     )
-    assert data["name"] == "Alex Rivera"
+    assert data["name"] == "Alex"
     assert FakeOllamaHandler.last_payload is not None
     images = FakeOllamaHandler.last_payload["messages"][1]["images"]
     assert len(images) == 2
@@ -320,7 +377,8 @@ def test_generate_all_about_me_profile_returns_markdown_and_pdf(
         "Name: Alex Rivera\nFavorite reinforcers: stickers"
     )
     assert "# All About Me" in markdown
-    assert "Alex Rivera" in markdown
+    assert "Alex" in markdown
+    assert "Alex Rivera" not in markdown
     assert pdf_bytes.startswith(b"%PDF")
 
 

@@ -14,9 +14,11 @@ from pdf_filler import (
     fill_form_pdf,
     merge_profiles_pdf,
     normalize_form_data,
+    participant_first_name_from_text,
     _map_box,
     _map_x,
     _na_if_blank_or_none,
+    _naturalize_medical_summary,
     _sanitize_bathroom_needs,
     _sanitize_favorite_thing,
     _sanitize_reinforcer,
@@ -51,7 +53,7 @@ def test_empty_form_data_has_all_keys() -> None:
 def test_normalize_form_data_from_lists() -> None:
     normalized = normalize_form_data(
         {
-            "name": "  Avery  ",
+            "name": "  Avery Quinn  ",
             "favorite_things": ["art", "reading", "puzzles", "ignored"],
             "favorite_reinforcers": ["hugs", "music"],
             "parent_name": "Jamie",
@@ -63,10 +65,10 @@ def test_normalize_form_data_from_lists() -> None:
         }
     )
     assert normalized["name"] == "Avery"
-    assert normalized["favorite_things_1"] == "art"
-    assert normalized["favorite_things_2"] == "reading"
-    # 4th item is combined into the 3rd slot (max 3 bullets).
-    assert normalized["favorite_things_3"] == "puzzles, ignored"
+    # Favorites pack into 2 bullets, combining across both (not only the last).
+    assert normalized["favorite_things_1"] == "art, reading"
+    assert normalized["favorite_things_2"] == "puzzles, ignored"
+    assert normalized["favorite_things_3"] == ""
     assert normalized["reinforcers_1"] == "hugs"
     assert normalized["reinforcers_2"] == "music"
     assert normalized["reinforcers_3"] == ""
@@ -112,15 +114,112 @@ def test_normalize_drops_diagnosis_bleed_from_favorite_things() -> None:
     assert normalized["reinforcers_3"] == ""
 
 
-def test_normalize_combines_overflow_reinforcers_into_three() -> None:
+def test_normalize_combines_overflow_reinforcers_across_slots() -> None:
     normalized = normalize_form_data(
         {
             "favorite_reinforcers": ["praise", "stickers", "breaks", "snacks", "tokens"],
         }
     )
-    assert normalized["reinforcers_1"] == "praise"
-    assert normalized["reinforcers_2"] == "stickers"
-    assert normalized["reinforcers_3"] == "breaks, snacks, tokens"
+    # 5 items → 3 slots distributed: 2, 2, 1
+    assert normalized["reinforcers_1"] == "praise, stickers"
+    assert normalized["reinforcers_2"] == "breaks, snacks"
+    assert normalized["reinforcers_3"] == "tokens"
+
+
+def test_participant_first_name_from_for_header() -> None:
+    text = (
+        "submission ID# 123456 For: Rivera, Alex | DOB: 3/4/2015 | "
+        "Parent: Sam Rivera"
+    )
+    assert participant_first_name_from_text(text) == "Alex"
+    assert participant_first_name_from_text("For: Smith, Jordan Lee | DOB: 1/1/2010") == "Jordan"
+    assert participant_first_name_from_text("no header here") == ""
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("Is epi pen provided: none", "no epi pen"),
+        ("epi pen provided: no", "no epi pen"),
+        ("Does participant have seizures: no", "no seizures"),
+        ("Allergies: none", "no allergies"),
+        ("Food allergies: none", "no food allergies"),
+        ("Participant food allergies/dietary restrictions: none", "no food allergies"),
+        ("Latex allergy; food allergies: none", "Latex allergy; no food allergies"),
+        ("Allergic to peanuts, no allergies", "Allergic to peanuts"),
+        ("Peanuts; no epi pen", "Peanuts; no epi pen"),
+        ("", ""),
+    ],
+)
+def test_naturalize_medical_summary(raw: str, expected: str) -> None:
+    assert _naturalize_medical_summary(raw) == expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (
+            "Participant's areas that can be challenging: becomes upset in loud rooms. "
+            "Strategies that help with challenges: offer headphones and a quiet break.",
+            "becomes upset in loud rooms. offer headphones and a quiet break.",
+        ),
+        (
+            "Participant's behavioral challenges: elopes from group. "
+            "Behavioral strategies: stay within arm's reach.",
+            "elopes from group. stay within arm's reach.",
+        ),
+        ("Offer choices when frustrated.", "Offer choices when frustrated."),
+        ("None at the moment", ""),
+        ("none", ""),
+        ("N/A", ""),
+        ("Participant's behavioral challenges: None at the moment", ""),
+    ],
+)
+def test_naturalize_behavioral_summary(raw: str, expected: str) -> None:
+    from pdf_filler import _naturalize_behavioral_summary
+
+    assert _naturalize_behavioral_summary(raw) == expected
+
+
+def test_apply_none_source_guards_blanks_hallucinated_behavioral() -> None:
+    from pdf_filler import apply_none_source_guards, normalize_form_data
+
+    hallucinated = normalize_form_data(
+        {
+            "name": "Alex",
+            "behavioral_management": (
+                "Gets upset in loud rooms; offer headphones and a quiet break."
+            ),
+            "favorite_things": ["music"],
+        }
+    )
+    source = (
+        "submission ID# 1 For: Rivera, Alex | DOB: 1/1/2015\n"
+        "Participant's behavioral challenges: None at the moment\n"
+        "Participant's strengths and favorite interests: music\n"
+    )
+    guarded = apply_none_source_guards(hallucinated, source)
+    assert guarded["behavioral_management"] == ""
+    assert guarded["favorite_things_1"] == "music"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("none", True),
+        ("None at the moment", True),
+        ("nothing at this time", True),
+        ("n/a", True),
+        ("no concerns", True),
+        ("offer choices", False),
+        ("no epi pen", False),
+        ("no food allergies", False),
+    ],
+)
+def test_is_none_like_answer(raw: str, expected: bool) -> None:
+    from pdf_filler import _is_none_like_answer
+
+    assert _is_none_like_answer(raw) is expected
 
 
 @pytest.mark.parametrize(
@@ -180,9 +279,9 @@ def test_normalize_form_data_flat_keys_and_reinforcers_alias() -> None:
     # Sparse slots are packed forward so empty bullets are not left in between.
     assert normalized["favorite_things_1"] == "drums"
     assert normalized["favorite_things_2"] == ""
-    assert normalized["reinforcers_1"] == "token"
-    assert normalized["reinforcers_2"] == "break"
-    assert normalized["reinforcers_3"] == "snack, park"
+    assert normalized["reinforcers_1"] == "token, break"
+    assert normalized["reinforcers_2"] == "snack"
+    assert normalized["reinforcers_3"] == "park"
     assert normalized["allergies"] == "Dairy"
     assert "buttons" in normalized["bathroom_needs"]
 

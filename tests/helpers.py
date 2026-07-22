@@ -86,7 +86,7 @@ def start_ollama_server() -> tuple[HTTPServer, threading.Thread, str]:
     """Start FakeOllamaHandler on an ephemeral port; caller must shut it down."""
     FakeOllamaHandler.response_content = json.dumps(
         {
-            "name": "Alex Rivera",
+            "name": "Alex",
             "favorite_things": ["swimming", "music", "dogs"],
             "favorite_reinforcers": ["stickers", "breaks", "high five"],
             "parent_name": "Sam Rivera",
