@@ -18,6 +18,7 @@ from pdf_filler import (
     _map_x,
     _na_if_blank_or_none,
     _sanitize_bathroom_needs,
+    _sanitize_favorite_thing,
     _sanitize_reinforcer,
     _template_pdf,
     _wrap_text,
@@ -41,9 +42,10 @@ def test_empty_form_data_has_all_keys() -> None:
     data = empty_form_data()
     assert data["name"] == ""
     assert data["favorite_things_3"] == ""
-    assert data["reinforcers_4"] == ""
+    assert data["reinforcers_3"] == ""
+    assert "reinforcers_4" not in data
     assert data["behavioral_management"] == ""
-    assert len(data) == 14
+    assert len(data) == 13
 
 
 def test_normalize_form_data_from_lists() -> None:
@@ -62,10 +64,13 @@ def test_normalize_form_data_from_lists() -> None:
     )
     assert normalized["name"] == "Avery"
     assert normalized["favorite_things_1"] == "art"
-    assert normalized["favorite_things_3"] == "puzzles"
+    assert normalized["favorite_things_2"] == "reading"
+    # 4th item is combined into the 3rd slot (max 3 bullets).
+    assert normalized["favorite_things_3"] == "puzzles, ignored"
     assert normalized["reinforcers_1"] == "hugs"
     assert normalized["reinforcers_2"] == "music"
     assert normalized["reinforcers_3"] == ""
+    assert "reinforcers_4" not in normalized
     assert normalized["allergies"] == "N/A"
     assert normalized["bathroom_needs"] == "N/A"
     assert normalized["behavioral_management"] == "Take breaks."
@@ -86,10 +91,36 @@ def test_normalize_drops_junk_reinforcers_and_does_not_pad_none() -> None:
     assert normalized["reinforcers_1"] == "verbal praise"
     assert normalized["reinforcers_2"] == ""
     assert normalized["reinforcers_3"] == ""
-    assert normalized["reinforcers_4"] == ""
     assert normalized["favorite_things_1"] == "soccer"
     assert normalized["favorite_things_2"] == ""
     assert normalized["favorite_things_3"] == ""
+
+
+def test_normalize_drops_diagnosis_bleed_from_favorite_things() -> None:
+    """N/A favorites must stay blank — diagnoses must not fill the slots."""
+    normalized = normalize_form_data(
+        {
+            "favorite_things": ["N/A", "autism", "ID"],
+            "favorite_reinforcers": ["none", "intellectual disability", ""],
+        }
+    )
+    assert normalized["favorite_things_1"] == ""
+    assert normalized["favorite_things_2"] == ""
+    assert normalized["favorite_things_3"] == ""
+    assert normalized["reinforcers_1"] == ""
+    assert normalized["reinforcers_2"] == ""
+    assert normalized["reinforcers_3"] == ""
+
+
+def test_normalize_combines_overflow_reinforcers_into_three() -> None:
+    normalized = normalize_form_data(
+        {
+            "favorite_reinforcers": ["praise", "stickers", "breaks", "snacks", "tokens"],
+        }
+    )
+    assert normalized["reinforcers_1"] == "praise"
+    assert normalized["reinforcers_2"] == "stickers"
+    assert normalized["reinforcers_3"] == "breaks, snacks, tokens"
 
 
 @pytest.mark.parametrize(
@@ -104,11 +135,36 @@ def test_normalize_drops_junk_reinforcers_and_does_not_pad_none() -> None:
         ("Independently", ""),
         ("independent walker", ""),
         ("help in the restroom", ""),
+        ("autism", ""),
+        ("ASD", ""),
+        ("ID", ""),
+        ("intellectual disability", ""),
+        ("ADHD", ""),
         ("", ""),
     ],
 )
 def test_sanitize_reinforcer(raw: str, expected: str) -> None:
     assert _sanitize_reinforcer(raw) == expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("soccer", "soccer"),
+        ("painting and reading", "painting and reading"),
+        ("none", ""),
+        ("n/a", ""),
+        ("autism", ""),
+        ("autism and ID", ""),
+        ("ID", ""),
+        ("intellectual disability", ""),
+        ("Down syndrome", ""),
+        ("independent", ""),
+        ("", ""),
+    ],
+)
+def test_sanitize_favorite_thing(raw: str, expected: str) -> None:
+    assert _sanitize_favorite_thing(raw) == expected
 
 
 def test_normalize_form_data_flat_keys_and_reinforcers_alias() -> None:
@@ -124,7 +180,9 @@ def test_normalize_form_data_flat_keys_and_reinforcers_alias() -> None:
     # Sparse slots are packed forward so empty bullets are not left in between.
     assert normalized["favorite_things_1"] == "drums"
     assert normalized["favorite_things_2"] == ""
-    assert normalized["reinforcers_4"] == "park"
+    assert normalized["reinforcers_1"] == "token"
+    assert normalized["reinforcers_2"] == "break"
+    assert normalized["reinforcers_3"] == "snack, park"
     assert normalized["allergies"] == "Dairy"
     assert "buttons" in normalized["bathroom_needs"]
 

@@ -35,7 +35,7 @@ Return ONLY valid JSON (no markdown fences, no commentary) with this shape:
 {
   "name": "",
   "favorite_things": ["", "", ""],
-  "favorite_reinforcers": ["", "", "", ""],
+  "favorite_reinforcers": ["", "", ""],
   "parent_name": "",
   "parent_phone": "",
   "parent_email": "",
@@ -44,18 +44,36 @@ Return ONLY valid JSON (no markdown fences, no commentary) with this shape:
   "behavioral_management": ""
 }
 
+CRITICAL — no hallucination:
+- Copy facts ONLY from the designated SOURCE labels below on THIS form.
+- If a source answer is blank, illegible, "none", "n/a", or "no", leave that
+  JSON field empty ("" / ["","",""]) or use "N/A" only where noted.
+- NEVER invent hobbies, interests, reinforcers, names, contacts, allergies,
+  bathroom needs, strategies, or any other values.
+- NEVER use example values from this prompt. NEVER fill gaps with guesses,
+  stereotypes, or "typical" answers.
+- Leaving a field blank is always better than making something up.
+
 SOURCE → TEMPLATE mapping (use ONLY these input-form labels; ignore other sections):
 - name: participant name fields only.
-- favorite_things: ONLY "Participant's strengths and favorite interests".
-  Split into up to 3 short list items. Use fewer items if needed; unused slots "".
-  Never pad with "none", "n/a", or "independent".
-- favorite_reinforcers: ONLY "Favorite reinforcers" (rewards / motivators such as
-  praise, stickers, breaks, snacks, preferred activities).
-  Split into up to 4 short list items. Use fewer items if needed; unused slots "".
+- favorite_things: ONLY the answer written under
+  "Participant's strengths and favorite interests".
+  Split into up to 3 short list items. Combine related items onto one line if
+  needed to stay within 3. Unused slots must be "".
+  If that source is blank / "none" / "n/a" / "no" / illegible, return ["", "", ""].
+  NEVER copy diagnoses, disabilities, medical labels, or other sections
+  (autism, ASD, ID, intellectual disability, ADHD, Down syndrome, etc.).
+  Never pad with "none", "n/a", "no", or "independent".
+- favorite_reinforcers: ONLY the answer written under "Favorite reinforcers"
+  (rewards / motivators written on the form).
+  Split into up to 3 short list items. Combine onto fewer lines if needed.
+  Unused slots must be "". If that source is blank / "none" / "n/a" / "no" /
+  illegible, return ["", "", ""].
   Never invent items. Never copy words from other sections (bathroom, strengths,
-  mobility, independence). Never pad with "none", "n/a", "no", or "independent".
+  mobility, independence, diagnoses, disabilities). Never pad with "none",
+  "n/a", "no", or "independent".
 - parent_name / parent_phone / parent_email: parent/guardian contact fields only.
-  Single-line values.
+  Single-line values. Empty string if that contact line is blank.
 - allergies: ONLY combine these four source areas into one concise summary:
   1) "Medications, if taken during camp hours"
   2) "Does participant have seizures?"
@@ -65,20 +83,26 @@ SOURCE → TEMPLATE mapping (use ONLY these input-form labels; ignore other sect
 - bathroom_needs: ONLY "Does the participant need help in the restroom?".
   If blank/none/no help needed, return exactly "N/A".
   Toileting only — never mobility wording (walker, gait, ambulation).
-- behavioral_management: ONLY combine:
+- behavioral_management: ONLY combine answers from these source areas (any that
+  appear on the form; accept near-matching label wording):
   1) "Participant's areas that can be challenging"
   2) "Strategies that help with challenges"
-  Concise paragraph (roughly 1–4 sentences). Empty string if neither has content.
+  3) "Behavioral strategies" / "Behavioral Strategies" / "Behavorial Strategies"
+  Copy the written notes into one concise paragraph (roughly 1–4 sentences).
+  If ANY of these sections has readable content, fill this field from it.
+  Empty string only when all of them are blank / "none" / "n/a" / illegible.
 
 Rules:
-- Use only facts from the mapped source areas above. Never invent or borrow from other fields.
+- Use only facts from the mapped source areas above. Never invent or borrow from
+  other fields. Diagnoses / disabilities never belong in favorite_things or
+  favorite_reinforcers — leave those lists blank rather than substitute.
 - Printed and handwritten answers both count. Read carefully through glare, shadow,
   or slight blur when the text is still legible.
 - If a printed label is hard to read but the filled answer clearly sits in that
   field's usual place on the form, still extract it into the matching JSON key.
 - Light typo cleanup is allowed; do not change meaning.
-- Prefer a best-effort partial fill over empty strings when some mapped fields
-  are readable and others are not.
+- Partial extraction is fine: fill only fields whose source text you can actually
+  read. Do not invent values for unreadable or blank fields.
 - Page 1 list items stay short (a few words each).
 - Page 2 body fields may be short sentences when the source supports it.
 - When multiple images are provided, they are consecutive pages of ONE participant
@@ -151,7 +175,7 @@ def _chat(
         "format": "json",
         "keep_alive": "30m",
         "options": {
-            "temperature": 0.1,
+            "temperature": 0,
             "num_predict": num_predict,
             "num_ctx": num_ctx,
         },
@@ -302,7 +326,7 @@ def form_data_to_markdown(form_data: dict[str, str]) -> str:
     ]
     reinforcers = [
         form_data.get(f"reinforcers_{index}", "").strip()
-        for index in range(1, 5)
+        for index in range(1, 4)
         if form_data.get(f"reinforcers_{index}", "").strip()
     ]
 
@@ -378,8 +402,10 @@ def extract_form_data(
             "These are photo(s) of a filled participant intake form. "
             "Read printed and handwritten answers carefully, then map them "
             "into the All About Me JSON using the SOURCE → TEMPLATE rules. "
-            "Extract every mapped field you can read; leave a field empty only "
-            f"when that answer is truly missing or illegible. Return JSON only."
+            "Copy only text that actually appears in each designated source "
+            "slot. If a slot is blank, n/a, none, or unreadable, leave that "
+            "JSON field empty (or N/A where the rules say). Do not invent or "
+            f"guess any values. Return JSON only."
             f"{page_note}"
         )
         if text:
@@ -388,7 +414,8 @@ def extract_form_data(
         prompt_text = (
             "Map the labeled input-form answers into the All About Me JSON "
             "using only the SOURCE → TEMPLATE rules from the system prompt. "
-            "Return JSON only.\n\n"
+            "Copy only facts present in the designated source slots. "
+            "Do not invent or guess. Return JSON only.\n\n"
             f"TEXT SOURCE:\n{text or '[No text source was supplied.]'}"
         )
 

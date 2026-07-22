@@ -67,6 +67,22 @@ def test_model_helpers_use_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     assert _vision_model() == ai_backend.DEFAULT_VISION_MODEL
 
 
+def test_system_prompt_forbids_hallucination_and_avoids_leaky_examples() -> None:
+    prompt = ai_backend.SYSTEM_PROMPT.lower()
+    assert "no hallucination" in prompt
+    assert "never invent" in prompt
+    assert "never use example values" in prompt
+    # Concrete hobby examples previously leaked into model output.
+    assert "painting" not in prompt
+    assert "soccer" not in prompt
+    assert "music" not in prompt
+    assert "stickers" not in prompt
+    assert "praise" not in prompt
+    # Behavioral management must accept the common form label variants.
+    assert "behavioral strategies" in prompt
+    assert "strategies that help with challenges" in prompt
+
+
 def test_parse_form_json_plain_object() -> None:
     data = _parse_form_json(
         json.dumps(
@@ -279,7 +295,7 @@ def test_extract_form_data_rejects_empty_participant_payload(
         {
             "name": "",
             "favorite_things": ["", "", ""],
-            "favorite_reinforcers": ["", "", "", ""],
+            "favorite_reinforcers": ["", "", ""],
             "allergies": "N/A",
             "bathroom_needs": "N/A",
             "behavioral_management": "",

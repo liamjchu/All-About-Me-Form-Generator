@@ -21,7 +21,8 @@ _FONTS_DIR: Final = PROJECT_ROOT / "fonts"
 _PREVIEW_SIZE: Final = (1190, 1541)
 
 # Boxes in preview coordinates (x0, y0, x1, y1), top-left origin.
-# Sized so filled text can match nearby template labels/headers.
+# Sized so filled text stays inside the template's white writing areas.
+# Favorite things and reinforcers each support at most 3 bullets.
 _PAGE1_BOXES: Final[dict[str, tuple[int, int, int, int]]] = {
     "name": (250, 420, 940, 545),
     "favorite_things_1": (90, 760, 940, 855),
@@ -30,8 +31,11 @@ _PAGE1_BOXES: Final[dict[str, tuple[int, int, int, int]]] = {
     "reinforcers_1": (340, 1090, 1100, 1190),
     "reinforcers_2": (340, 1200, 1100, 1290),
     "reinforcers_3": (340, 1300, 1100, 1390),
-    "reinforcers_4": (340, 1400, 1100, 1490),
+    # Extra white cover for leftover template placeholder rows only (not filled).
+    "reinforcers_cover_4": (340, 1400, 1100, 1490),
 }
+
+_PAGE1_BULLET_SLOTS: Final = 3
 
 # Bulleted list layout on page 1 (preview coordinates, relative to each cover box).
 _PAGE1_BULLET_FROM_BOX_X: Final = 50
@@ -66,13 +70,28 @@ _FIELD_KEYS: Final[tuple[str, ...]] = (
     "reinforcers_1",
     "reinforcers_2",
     "reinforcers_3",
-    "reinforcers_4",
     "parent_name",
     "parent_phone",
     "parent_email",
     "allergies",
     "bathroom_needs",
     "behavioral_management",
+)
+
+# Diagnoses / disability labels must never land in favorite-things or reinforcer bullets.
+_DIAGNOSIS_BLEED: Final = re.compile(
+    r"\b(?:"
+    r"autism(?:\s+spectrum(?:\s+disorder)?)?|asd|autistic|"
+    r"intellectual\s+disabilit(?:y|ies)|"
+    r"\bid\b|"
+    r"adhd|attention\s+deficit|"
+    r"down(?:'?s)?\s+syndrome|"
+    r"cerebral\s+palsy|"
+    r"developmental\s+delay|"
+    r"disabilit(?:y|ies)|diagnos(?:is|es)|"
+    r"iep|504\s*plan"
+    r")\b",
+    flags=re.IGNORECASE,
 )
 
 _FONT_CANDIDATES: Final[tuple[str, ...]] = (
@@ -113,33 +132,47 @@ def normalize_form_data(raw: dict) -> dict[str, str]:
 
     things = raw.get("favorite_things")
     if isinstance(things, list):
-        for index, value in enumerate(things[:3], start=1):
+        for index, value in enumerate(things[:_PAGE1_BULLET_SLOTS], start=1):
             data[f"favorite_things_{index}"] = str(value).strip()
-    for index in range(1, 4):
+    for index in range(1, _PAGE1_BULLET_SLOTS + 1):
         key = f"favorite_things_{index}"
         if isinstance(raw.get(key), str) and raw[key].strip():
             data[key] = raw[key].strip()
+    # Also accept overflow list items so they can be combined into ≤3 slots.
+    extra_things: list[str] = []
+    if isinstance(things, list) and len(things) > _PAGE1_BULLET_SLOTS:
+        extra_things = [str(value).strip() for value in things[_PAGE1_BULLET_SLOTS:]]
     _assign_packed_list(
         data,
         prefix="favorite_things",
-        count=3,
-        values=[data[f"favorite_things_{i}"] for i in range(1, 4)],
-        sanitize=_sanitize_list_bullet,
+        count=_PAGE1_BULLET_SLOTS,
+        values=[data[f"favorite_things_{i}"] for i in range(1, _PAGE1_BULLET_SLOTS + 1)]
+        + extra_things,
+        sanitize=_sanitize_favorite_thing,
     )
 
     reinforcers = raw.get("favorite_reinforcers") or raw.get("reinforcers")
     if isinstance(reinforcers, list):
-        for index, value in enumerate(reinforcers[:4], start=1):
+        for index, value in enumerate(reinforcers[:_PAGE1_BULLET_SLOTS], start=1):
             data[f"reinforcers_{index}"] = str(value).strip()
-    for index in range(1, 5):
+    for index in range(1, _PAGE1_BULLET_SLOTS + 1):
         key = f"reinforcers_{index}"
         if isinstance(raw.get(key), str) and raw[key].strip():
             data[key] = raw[key].strip()
+    extra_reinforcers: list[str] = []
+    if isinstance(reinforcers, list) and len(reinforcers) > _PAGE1_BULLET_SLOTS:
+        extra_reinforcers = [
+            str(value).strip() for value in reinforcers[_PAGE1_BULLET_SLOTS:]
+        ]
+    # Legacy flat key reinforcers_4 may still arrive from older payloads.
+    if isinstance(raw.get("reinforcers_4"), str) and raw["reinforcers_4"].strip():
+        extra_reinforcers.append(raw["reinforcers_4"].strip())
     _assign_packed_list(
         data,
         prefix="reinforcers",
-        count=4,
-        values=[data[f"reinforcers_{i}"] for i in range(1, 5)],
+        count=_PAGE1_BULLET_SLOTS,
+        values=[data[f"reinforcers_{i}"] for i in range(1, _PAGE1_BULLET_SLOTS + 1)]
+        + extra_reinforcers,
         sanitize=_sanitize_reinforcer,
     )
 
@@ -170,8 +203,10 @@ def _assign_packed_list(
     values: list[str],
     sanitize,
 ) -> None:
-    """Keep only usable bullets, pack them to the front, leave the rest blank."""
+    """Keep usable bullets, pack to the front, combine overflow into ≤count slots."""
     packed = [cleaned for value in values if (cleaned := sanitize(value))]
+    if len(packed) > count:
+        packed = packed[: count - 1] + [", ".join(packed[count - 1 :])]
     for index in range(1, count + 1):
         data[f"{prefix}_{index}"] = packed[index - 1] if index <= len(packed) else ""
 
@@ -187,6 +222,11 @@ def _is_placeholder_bullet(text: str) -> bool:
     )
 
 
+def _looks_like_diagnosis(text: str) -> bool:
+    """True when a bullet is a diagnosis/disability label, not an interest/reward."""
+    return bool(_DIAGNOSIS_BLEED.search(text))
+
+
 def _sanitize_list_bullet(text: str) -> str:
     """Drop blank / none-style fillers from page-1 bullet lists."""
     cleaned = (text or "").strip(" \t\r\n,;.-")
@@ -195,10 +235,29 @@ def _sanitize_list_bullet(text: str) -> str:
     return cleaned
 
 
-def _sanitize_reinforcer(text: str) -> str:
-    """Keep real reinforcers; drop placeholders and off-field bleed (e.g. independent)."""
+def _sanitize_favorite_thing(text: str) -> str:
+    """Keep strengths/interests; drop placeholders and diagnosis bleed."""
     cleaned = _sanitize_list_bullet(text)
     if not cleaned:
+        return ""
+    if _looks_like_diagnosis(cleaned):
+        return ""
+    # Bare independence answers are not favorite things.
+    if re.fullmatch(
+        r"(?:independent(?:ly)?|independence)(?:\s*[.!]*)?",
+        cleaned,
+        flags=re.IGNORECASE,
+    ):
+        return ""
+    return cleaned
+
+
+def _sanitize_reinforcer(text: str) -> str:
+    """Keep real reinforcers; drop placeholders and off-field bleed."""
+    cleaned = _sanitize_list_bullet(text)
+    if not cleaned:
+        return ""
+    if _looks_like_diagnosis(cleaned):
         return ""
     # Bare independence / mobility answers are not reinforcers.
     if re.fullmatch(
@@ -371,10 +430,15 @@ def _draw_bullet_line(
     font_size: int = _FONT_BULLET,
     min_font_size: int = _FONT_MIN_BULLET,
 ) -> None:
-    """Draw a bullet and text for a filled row; skip empty rows."""
+    """Draw a bullet and text for a filled row; skip empty rows.
+
+    Text is shrunk, then truncated if needed, so it stays inside the white box.
+    """
+    x0, y0, x1, y1 = _map_box(cover_box, size)
+    # Erase template placeholder text in this row's white writing area.
+    draw.rectangle((x0, y0, x1, y1), fill=(255, 255, 255))
     if not text.strip():
         return
-    _, y0, x1, y1 = _map_box(cover_box, size)
 
     box_x0_preview = cover_box[0]
     text_x = _map_x(box_x0_preview + _PAGE1_BULLET_TEXT_FROM_BOX_X, size)
@@ -397,10 +461,32 @@ def _draw_bullet_line(
         font_size -= 2
         font = _load_font(font_size)
 
-    bbox = draw.textbbox((0, 0), text, font=font)
+    # Still too wide at the floor size — truncate so we never spill past the box.
+    display = text
+    if draw.textbbox((0, 0), display, font=font)[2] > max_width:
+        ellipsis = "…"
+        while display and draw.textbbox((0, 0), display + ellipsis, font=font)[2] > max_width:
+            display = display[:-1]
+        display = (display.rstrip(" ,;:-") + ellipsis) if display else ellipsis
+
+    bbox = draw.textbbox((0, 0), display, font=font)
     text_h = bbox[3] - bbox[1]
     y = cy - text_h // 2 - bbox[1]
-    draw.text((text_x, y), text, fill=(0, 0, 0), font=font)
+    draw.text((text_x, y), display, fill=(0, 0, 0), font=font)
+
+
+def _cover_page1_bullet_placeholders(draw: ImageDraw.ImageDraw, size: tuple[int, int]) -> None:
+    """White-out all page-1 bullet rows (including unused 4th reinforcer slot)."""
+    for key in (
+        "favorite_things_1",
+        "favorite_things_2",
+        "favorite_things_3",
+        "reinforcers_1",
+        "reinforcers_2",
+        "reinforcers_3",
+        "reinforcers_cover_4",
+    ):
+        draw.rectangle(_map_box(_PAGE1_BOXES[key], size), fill=(255, 255, 255))
 
 
 def _extract_page_images() -> list[Image.Image]:
@@ -464,7 +550,9 @@ def fill_form_pdf(form_data: dict[str, str]) -> bytes:
         min_font_size=_FONT_MIN_NAME,
         white_bg=True,
     )
-    for index in range(1, 4):
+    # Clear every bullet placeholder first so unused rows stay blank white.
+    _cover_page1_bullet_placeholders(draw1, size)
+    for index in range(1, _PAGE1_BULLET_SLOTS + 1):
         key = f"favorite_things_{index}"
         _draw_bullet_line(
             draw1,
@@ -474,7 +562,7 @@ def fill_form_pdf(form_data: dict[str, str]) -> bytes:
             font_size=_FONT_BULLET,
             min_font_size=_FONT_MIN_BULLET,
         )
-    for index in range(1, 5):
+    for index in range(1, _PAGE1_BULLET_SLOTS + 1):
         key = f"reinforcers_{index}"
         _draw_bullet_line(
             draw1,
@@ -502,6 +590,7 @@ def fill_form_pdf(form_data: dict[str, str]) -> bytes:
             font_size=font_size,
             min_font_size=_FONT_MIN_PAGE2,
             multiline=multiline,
+            white_bg=True,
         )
 
     reader = PdfReader(str(_template_pdf()))

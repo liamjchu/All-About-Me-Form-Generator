@@ -88,7 +88,7 @@ def start_ollama_server() -> tuple[HTTPServer, threading.Thread, str]:
         {
             "name": "Alex Rivera",
             "favorite_things": ["swimming", "music", "dogs"],
-            "favorite_reinforcers": ["stickers", "breaks", "high five", ""],
+            "favorite_reinforcers": ["stickers", "breaks", "high five"],
             "parent_name": "Sam Rivera",
             "parent_phone": "555-0100",
             "parent_email": "sam@example.com",
